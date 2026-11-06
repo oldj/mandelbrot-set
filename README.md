@@ -48,9 +48,11 @@ npm run preview
 5. 新请求会协作取消旧计算；结果携带任务编号，旧结果不能覆盖新视口。分块质量记录阻止迟到的低分辨率结果覆盖已完成的高分辨率像素。
 6. 迭代预算随深度增长。源码没有固定的放大倍数上限，但真实计算仍受 CPU、内存、迭代预算与数值误差影响；不能保证任意区域、任意深度都实时完成高清重绘。黑色表示在当前预算内未逃逸，并非严格的集合归属证明。极深缩放时，先显示可即时操作的缓存画面，再渐进生成新细节。
 
-配色按平滑逃逸迭代次数每 64 次循环，依次经过蓝、浅青、淡黄、金橙和深蓝紫，集合内部保持黑色。颜色不随放大倍率或迭代预算归一化，也不对逃逸次数再次取对数，因此深处的局部迭代差异不会被配色映射逐渐压缩；循环交界处同样平滑过渡。
+配色参考 `Mandelbrot_sequence_new.gif` 的 475 帧颜色统计，以及[原图说明](https://commons.wikimedia.org/wiki/File:Mandelbrot_sequence_new.gif)链接的[黄金渐变色值](https://github.com/josch/mandelbrot_zomb/blob/master/src/deepZoom/MandelAnimator.java)。从宝蓝、浅青、近白过渡到金黄、赭红、深蓝紫，集合内部保持黑色。色带宽度不均匀，以周期性单调三次插值生成 4096 段查询表，避免直线渐变的生硬连接和偏灰过渡。
 
-配色、迭代预算和扰动算法位于 `src/fractal.ts`，指数扩展运算位于 `src/extended.ts`，手势和渲染调度位于 `src/main.ts`，页面样式位于 `src/style.css`。
+色盘形状与循环频率分别控制：前 144 次平滑迭代保留参考图的平方根相位；144–512 次之间平滑提高循环频率，超过 512 次后固定每 128 次迭代循环。这样既保留浅层观感，又避免深层周期越拉越长、局部迭代差异落在同一片颜色中。过渡两端的相位与一阶导数连续。映射始终只依赖逃逸次数，不随窗口、平移或迭代预算变化，已有像素缓存仍可复用。这是参考配色的视觉拟合，并非原动画算法的逐像素复刻；原 GIF 还使用多重采样，本次未增加实时渲染的采样数量。
+
+配色位于 `src/palette.ts`，迭代预算和扰动算法位于 `src/fractal.ts`，指数扩展运算位于 `src/extended.ts`，手势和渲染调度位于 `src/main.ts`，页面样式位于 `src/style.css`。
 
 算法依据：[Claude Heiland-Allen 的 Deep Zoom](https://mathr.co.uk/web/deep-zoom.html) 及 [Deep zoom theory and practice](https://mathr.co.uk/blog/2021-05-14_deep_zoom_theory_and_practice.html)。本项目为 TypeScript 实现，没有引入分形运行时依赖。
 
