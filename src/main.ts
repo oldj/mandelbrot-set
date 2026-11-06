@@ -1,4 +1,4 @@
-import { initialView, transformView, viewOffset } from './precision';
+import { initialView, isInitialView, transformView, viewOffset } from './precision';
 import type { Point, View } from './precision';
 import { iterationBudget } from './fractal';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
@@ -101,6 +101,15 @@ function project(target: CanvasRenderingContext2D, source: Surface, destination:
   target.drawImage(source.canvas, x, y, source.cssWidth * ratio, source.cssHeight * ratio);
 }
 
+/** Reset is only offered once the view differs from the default one. */
+function updateResetButton(): void {
+  const hidden = isInitialView(view, cssWidth, cssHeight);
+  if (resetButton.hidden === hidden) return;
+  // Keep keyboard focus somewhere useful when the focused button disappears.
+  if (hidden && document.activeElement === resetButton) canvas.focus({ preventScroll: true });
+  resetButton.hidden = hidden;
+}
+
 function draw(): void {
   frame = 0;
   // The label observer can fire before the canvas has a size (e.g. a hidden page).
@@ -111,6 +120,7 @@ function draw(): void {
     zoomLabel.textContent = info.zoom;
     infoView = view; infoWidth = cssWidth; infoHeight = cssHeight;
     coordinateLayoutDirty = true;
+    updateResetButton();
   }
   if (coordinateLayoutDirty) {
     for (const [label, full] of [[realLabel, info.real], [imaginaryLabel, info.imaginary]] as const) {

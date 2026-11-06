@@ -24,8 +24,8 @@ test('zoom display handles ordinary, extreme and sub-unit scales without overflo
   assert.equal(formatZoom(0), '1.00×');
   assert.equal(formatZoom(1), '2.00×');
   assert.equal(formatZoom(-1), '0.50×');
-  assert.equal(formatZoom(4000), '1.32 × 10^1204');
-  assert.equal(formatZoom(-4000), '7.59 × 10^-1205');
+  assert.equal(formatZoom(4000), '1.32×10^1204');
+  assert.equal(formatZoom(-4000), '7.59×10^-1205');
 });
 
 test('copied deep coordinates retain all displayed precision without truncation', () => {

@@ -24,7 +24,8 @@ export function formatZoom(logZoom: number): string {
   let exponent = Math.floor(log10);
   let mantissa = (10 ** (log10 - exponent)).toFixed(2);
   if (mantissa === '10.00') { mantissa = '1.00'; exponent++; }
-  return `${mantissa} × 10^${exponent}`;
+  // No spaces around × so the zoom stays compact enough to show in full.
+  return `${mantissa}×10^${exponent}`;
 }
 
 export function viewInfo(view: View, initialLogScale: number): { real: string; imaginary: string; zoom: string } {

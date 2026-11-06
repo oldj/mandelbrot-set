@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ensurePrecision, fixedToNumber, initialView, scaledFixed, toFixed, transformView, viewOffset } from '../src/precision.ts';
+import { ensurePrecision, fixedToNumber, initialView, isInitialView, scaledFixed, toFixed, transformView, viewOffset } from '../src/precision.ts';
 import { gesture, wheelAnchor, wheelLogFactor } from '../src/gestures.ts';
 import { add, extended, linear, logMagnitude, perturbStep, ZERO } from '../src/extended.ts';
 
@@ -84,4 +84,13 @@ test('extended normalization keeps subnormal doubles finite', () => {
   assert.deepEqual(extended(Number.MIN_VALUE), { re: 1, im: 0, exp: -1074 });
   assert.deepEqual(extended(3 * 2 ** -1070, -(2 ** -1072)), { re: 1.5, im: -0.125, exp: -1069 });
   assert.deepEqual(add({ re: 1, im: 0, exp: -1000 }, { re: -(1 - 2 ** -52), im: 0, exp: -1000 }), { re: 1, im: 0, exp: -1052 });
+});
+
+test('the default view is recognised exactly, even at higher stored precision', () => {
+  const view = initialView(800, 600);
+  assert.ok(isInitialView(view, 800, 600));
+  assert.ok(isInitialView({ ...view, re: view.re << 448n, im: view.im << 448n, bits: 640 }, 800, 600));
+  assert.ok(!isInitialView(transformView(view, { x: 0, y: 0 }, { x: 0.01, y: 0 }, 0), 800, 600), 'a tiny pan counts');
+  assert.ok(!isInitialView(transformView(view, { x: 0, y: 0 }, { x: 0, y: 0 }, -0.01), 800, 600), 'a tiny zoom counts');
+  assert.ok(!isInitialView(view, 800, 700), 'a window with another fitting scale has a different default');
 });

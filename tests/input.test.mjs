@@ -348,3 +348,20 @@ test('deep renders share one orbit: worker 0 builds it, the rest receive it once
   assert.notEqual(h.request().reference.key, key);
   assert.equal(h.request().reference.build, true);
 });
+
+test('reset is hidden at the default view and appears once the view changes', () => {
+  const h = harness();
+  const reset = h.elements.get('#reset-view');
+  h.flushFrames();
+  assert.equal(reset.hidden, true);
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 });
+  h.flushFrames();
+  assert.equal(reset.hidden, false);
+  reset.emit('click');
+  h.flushFrames();
+  assert.equal(reset.hidden, true);
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 400, clientY: 300 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 410, clientY: 300 });
+  h.flushFrames();
+  assert.equal(reset.hidden, false, 'panning alone also offers reset');
+});

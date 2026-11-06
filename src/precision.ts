@@ -67,3 +67,13 @@ export function viewOffset(from: View, to: View): Point {
   const im = (from.im << BigInt(bits - from.bits)) - (to.im << BigInt(bits - to.bits));
   return { x: fixedToNumber(re, bits, to.logScale), y: -fixedToNumber(im, bits, to.logScale) };
 }
+
+/** Exactly the default view for this window size (any pan or zoom makes it differ). */
+export function isInitialView(view: View, width: number, height: number): boolean {
+  const initial = initialView(width, height);
+  if (view.logScale !== initial.logScale) return false;
+  const bits = Math.max(view.bits, initial.bits);
+  const align = (value: bigint, from: number) => value << BigInt(bits - from);
+  return align(view.re, view.bits) === align(initial.re, initial.bits)
+    && align(view.im, view.bits) === align(initial.im, initial.bits);
+}
