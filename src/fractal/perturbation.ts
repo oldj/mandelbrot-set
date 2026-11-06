@@ -5,12 +5,12 @@
  * interior proofs of ./interior.ts. perturbNative covers views down to 2^-900;
  * perturbExtended carries a separate exponent below that.
  */
-import { add, extended, linear, logAdd, logMagnitude, perturbStep, ZERO } from '../math/extended.ts';
+import { add, extended, linear, logAdd, logMagnitude, magnitude, perturbStep, ZERO } from '../math/extended.ts';
 import type { Extended } from '../math/extended.ts';
 import { escapeDistance, INTERIOR, lastSample, smooth } from './escape.ts';
 import {
-  attractingCycle, LOG_ROUNDING, NEWTON_BAND, NEWTON_COST, NEWTON_RETURN_SQUARED, PROOF_START, ROUNDING, TRAP_BAND,
-  TRAP_RETURN_SQUARED,
+  attractingCycle, LOG_ROUNDING, NEWTON_BAND, NEWTON_COST, NEWTON_RETURN_SQUARED, PROOF_START, ROUNDING, SQRT2, TINY_SQUARE,
+  TRAP_BAND, TRAP_RETURN_SQUARED,
 } from './interior.ts';
 import { lookupExtended, lookupNative, NATIVE_FIELDS } from './orbit.ts';
 import type { Reference } from './orbit.ts';
@@ -33,6 +33,7 @@ export interface SampleStats { fallbacks: number; skipped: number; unresolved: n
  */
 export function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: number, fallback: () => number, stats: SampleStats, pixel: number): number {
   const real = reference.real, imag = reference.imag, first = reference.firstRadiusSquared, glitch = reference.glitch;
+  const skip = reference.skipRadiusSquared;
   const end = real.length - 1;
   // zr, zi always hold Z_m; deltaSquared holds |δ|² for the current δ.
   let dr = 0, di = 0, m = 0, n = 0, zr = real[0], zi = imag[0], deltaSquared = 0;
@@ -53,7 +54,8 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
     let stepped = false;
     if (!verify) {
       while (n < limit) {
-        const quick = first[m];
+        // A block of 2 or more steps may apply (its radius is at most level 0's).
+        const quick = skip[m];
         if (quick >= 1e-280 ? deltaSquared < quick : quick > 0) break;
         steps++;
         const tr = zr + dr, ti = zi + di, nextEr = 2 * (tr * er - ti * ei) + pixel;
@@ -70,14 +72,19 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
           break;
         }
         // Within the tracked band, only steps the bookkeeping below acts on
-        // leave: a new minimum or near return (relative < 2^-8 |base|²), or a
-        // return attractingCycle may try now. The tests are the same ones.
+        // leave: a new minimum (it moves the base), an attractingCycle attempt,
+        // or an in-loop proof start. Orbits lingering near a parabolic or
+        // repelling point stay in the band for thousands of steps that change
+        // nothing. The tests are the bookkeeping's own, in the same order.
         if (squared <= far) {
           const relative = squared - baseSquared, period = n - baseN;
-          if (relative < TRAP_BAND * baseSquared || relative < NEWTON_BAND * baseSquared && n >= newtonRetry
-            && n >= PROOF_START && period > 2 && spent + NEWTON_COST * period <= steps) {
-            stepped = true;
-            break;
+          if (relative < 0) { stepped = true; break; }
+          if (n >= PROOF_START && period > 2) {
+            const ex = totalRe - baseRe, ey = totalIm - baseIm, distanceSquared = ex * ex + ey * ey;
+            if (relative < NEWTON_BAND * baseSquared && n >= newtonRetry && spent + NEWTON_COST * period <= steps
+              && distanceSquared < NEWTON_RETURN_SQUARED * baseSquared) { stepped = true; break; }
+            if (relative < TRAP_BAND * baseSquared && n >= retry && spent + period <= steps
+              && distanceSquared < TRAP_RETURN_SQUARED * baseSquared) { stepped = true; break; }
           }
         }
         if (squared < deltaSquared || m === end) {
@@ -106,8 +113,8 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
         m += length; n += length; stats.skipped += length - 1;
       } else {
         if (verify) {
-          const reference = Math.hypot(zr, zi), delta = Math.hypot(dr, di);
-          const twice = 2 * Math.hypot(zr + dr, zi + di), rounding = ROUNDING * (4 * reference * delta + delta * delta) + dcError;
+          const reference = SQRT2 * Math.max(Math.abs(zr), Math.abs(zi)), delta = SQRT2 * Math.max(Math.abs(dr), Math.abs(di));
+          const tr = zr + dr, ti = zi + di, twice = 2 * Math.sqrt(tr * tr + ti * ti + TINY_SQUARE), rounding = ROUNDING * (4 * reference * delta + delta * delta) + dcError;
           ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
           rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
         }
@@ -139,9 +146,9 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
     }
     if (verify) {
       // Representing z as Z + δ rounds once more; rebasing makes that the new state.
-      const error = ROUNDING * (Math.hypot(zr, zi) + Math.hypot(dr, di));
+      const error = ROUNDING * (magnitude(zr, zi) + magnitude(dr, di));
       if (--verify === 0) {
-        const distance = Math.hypot(totalRe - startRe, totalIm - startIm) + startError + error;
+        const distance = magnitude(totalRe - startRe, totalIm - startIm) + startError + error;
         if (distance + ra <= radius0 || distance + rb <= radius0 * 2 ** 8
           || distance + rc <= radius0 * 2 ** 16 || distance + rd <= radius0 * 2 ** 24) return INTERIOR;
         // Failed: relearn the base from scratch, and back off so orbits that

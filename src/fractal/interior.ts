@@ -6,7 +6,18 @@
  * never affected. perturbNative tracks returns of its orbit and decides when
  * to try them; directRow does the same for shallow views.
  */
+import { magnitude } from '../math/extended.ts';
 import type { Reference } from './orbit.ts';
+
+/**
+ * The disk bounds per step need upper bounds, not exact moduli, and must
+ * survive squares that underflow at extreme depths. Where a modulus only
+ * scales the rounding term, √2 max(|x|, |y|) bounds it (within √2). For |z|,
+ * which multiplies the radius, √(x² + y² + TINY_SQUARE) is exact above
+ * 10^-140 and above |z| below it. Both avoid a Math.hypot fallback, whose mere
+ * presence in the loop slows it by a third in V8.
+ */
+export const TINY_SQUARE = 1e-280, SQRT2 = Math.SQRT2;
 
 /** A return within 2^-10 of the base point (in squared terms) starts an interior proof attempt. */
 export const TRAP_RETURN_SQUARED = 2 ** -20;
@@ -60,7 +71,7 @@ export function trappedDouble(cr: number, ci: number, zr: number, zi: number, pe
   let ra = radius0, rb = radius0 * 2 ** 8, rc = radius0 * 2 ** 16, rd = radius0 * 2 ** 24;
   let re = zr, im = zi, r2 = zr * zr, i2 = zi * zi;
   for (let k = 0; k < period; k++) {
-    const twice = 2 * Math.sqrt(r2 + i2), rounding = ROUNDING * (r2 + i2 + cMagnitude);
+    const twice = 2 * Math.sqrt(r2 + i2 + TINY_SQUARE), rounding = ROUNDING * (r2 + i2 + cMagnitude);
     ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
     rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
     im = 2 * re * im + ci; re = r2 - i2 + cr; r2 = re * re; i2 = im * im;
@@ -97,14 +108,15 @@ export function attractingCycle(reference: Reference, m0: number, sr: number, si
     // the start, the end and on rebasing, which add it explicitly.
     const check = pass > 0;
     const startRe = real[m0] + sr, startIm = imag[m0] + si;
-    const startError = ROUNDING * (Math.sqrt(real[m0] * real[m0] + imag[m0] * imag[m0]) + Math.sqrt(sr * sr + si * si));
+    const startError = ROUNDING * (magnitude(real[m0], imag[m0]) + magnitude(sr, si));
     let ra = radius0, rb = radius0 * 16, rc = radius0 * 256, rd = radius0 * 4096;
     let m = m0, dr = sr, di = si, Dr = 1, Di = 0;
     for (let k = 0; k < period; k++) {
       const zr = real[m], zi = imag[m], tr = zr + dr, ti = zi + di;
       if (check) {
-        const ref = Math.sqrt(zr * zr + zi * zi), delta = Math.sqrt(dr * dr + di * di);
-        const twice = 2 * Math.sqrt(tr * tr + ti * ti), rounding = ROUNDING * (4 * ref * delta + delta * delta) + dcError;
+        // Upper bounds without branches (see TINY_SQUARE): only the rounding uses |Z| and |δ|.
+        const ref = SQRT2 * Math.max(Math.abs(zr), Math.abs(zi)), delta = SQRT2 * Math.max(Math.abs(dr), Math.abs(di));
+        const twice = 2 * Math.sqrt(tr * tr + ti * ti + TINY_SQUARE), rounding = ROUNDING * (4 * ref * delta + delta * delta) + dcError;
         ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
         rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
       }
@@ -118,17 +130,17 @@ export function attractingCycle(reference: Reference, m0: number, sr: number, si
       if (!(squared <= 256)) return spent + k;
       if (squared < dr * dr + di * di || m === end) {
         if (check) {
-          const error = ROUNDING * (Math.sqrt(real[m] * real[m] + imag[m] * imag[m]) + Math.sqrt(dr * dr + di * di));
+          const error = ROUNDING * (magnitude(real[m], imag[m]) + magnitude(dr, di));
           ra += error; rb += error; rc += error; rd += error;
         }
         dr = er; di = ei; m = 0;
       }
     }
     spent += period;
-    const gr = real[m] + dr - startRe, gi = imag[m] + di - startIm, lambda = Math.sqrt(Dr * Dr + Di * Di);
+    const gr = real[m] + dr - startRe, gi = imag[m] + di - startIm, lambda = magnitude(Dr, Di);
     if (check) {
-      const error = ROUNDING * (Math.sqrt(real[m] * real[m] + imag[m] * imag[m]) + Math.sqrt(dr * dr + di * di));
-      const distance = Math.sqrt(gr * gr + gi * gi) + startError + error;
+      const error = ROUNDING * (magnitude(real[m], imag[m]) + magnitude(dr, di));
+      const distance = magnitude(gr, gi) + startError + error;
       if (distance + ra < radius0 || distance + rb < radius0 * 16 || distance + rc < radius0 * 256
         || distance + rd < radius0 * 4096) {
         provedCycle.found = true; provedCycle.m = m0; provedCycle.sr = sr; provedCycle.si = si; provedCycle.period = period;
@@ -140,7 +152,7 @@ export function attractingCycle(reference: Reference, m0: number, sr: number, si
     // derivative is that of the cycle) or once steps stop shrinking.
     const ar = Dr - 1, ai = Di, den = ar * ar + ai * ai;
     const stepRe = (gr * ar + gi * ai) / den, stepIm = (gi * ar - gr * ai) / den;
-    const step = Math.sqrt(stepRe * stepRe + stepIm * stepIm), size = Math.sqrt(startRe * startRe + startIm * startIm);
+    const step = magnitude(stepRe, stepIm), size = magnitude(startRe, startIm);
     if (!(lambda < 1) && !(step > 2 ** -8 * size)) break;
     if (!(step < previousStep) && pass > 2) break;
     sr -= stepRe; si -= stepIm;

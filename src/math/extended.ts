@@ -85,3 +85,13 @@ export function logAdd(a: number, b: number): number {
   if (b === -Infinity) return a;
   return Math.max(a, b) + Math.log2(1 + 2 ** -Math.abs(a - b));
 }
+
+/**
+ * |x + iy|: a plain square root where the squares stay well inside double
+ * range, else Math.hypot, which is exact about under- and overflow but an
+ * order of magnitude slower in V8. Hot bounds in the interior proofs use this.
+ */
+export function magnitude(x: number, y: number): number {
+  const squared = x * x + y * y;
+  return squared >= 1e-280 && squared <= 1e280 ? Math.sqrt(squared) : Math.hypot(x, y);
+}

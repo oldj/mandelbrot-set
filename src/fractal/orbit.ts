@@ -50,6 +50,12 @@ export interface Reference {
    * skips the whole lookup, the common case on long, poorly skippable orbits.
    */
   firstRadiusSquared: Float64Array;
+  /**
+   * Squared level-1 radius per orbit index (0 where no two-step block starts
+   * there). A single step is better done exactly than as a level-0 block (which
+   * drops δ²), so plain steps continue until a block of 2 or more may apply.
+   */
+  skipRadiusSquared: Float64Array;
   /** |Z_m|² · 1e-14: below this |z|² has lost too many bits to cancellation (a glitch). */
   glitch: Float64Array;
   /** Extended-exponent orbit and BLA tables, only built for views that need them (below 2^-900). */
@@ -130,9 +136,11 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
   }
   const firstRadiusSquared = new Float64Array(length);
   for (let i = 0; i < first.length; i++) firstRadiusSquared[i + 1] = native[0][i * NATIVE_FIELDS + 4];
+  const skipRadiusSquared = new Float64Array(length);
+  if (native.length > 1) for (let j = 0; j * NATIVE_FIELDS < native[1].length; j++) skipRadiusSquared[1 + 2 * j] = native[1][j * NATIVE_FIELDS + 4];
   const glitch = new Float64Array(length);
   for (let i = 0; i < length; i++) glitch[i] = (real[i] * real[i] + imag[i] * imag[i]) * 1e-14;
-  return { real, imag, native, firstRadiusSquared, glitch,
+  return { real, imag, native, firstRadiusSquared, skipRadiusSquared, glitch,
     orbit: extended ? Array.from({ length }, (_, i) => point(i)) : undefined, levels };
 }
 
