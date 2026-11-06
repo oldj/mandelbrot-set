@@ -284,13 +284,25 @@ function scheduleHash(): void {
   hashTimer = setTimeout(writeHash, 250);
 }
 
+/** A change after this long without one starts rendering at once (a wheel notch, the start of a drag). */
+const IDLE_MS = 250;
+/** During a stream of changes, restart at most this often, once the last render has shown its coarse pass. */
+const RESTART_MS = 180;
+/** And render this soon after the last change of a stream. */
+const SETTLE_MS = 60;
+let lastChange = -Infinity;
+
 function changed(): void {
   scheduleDraw();
   scheduleHash();
   clearTimeout(renderTimer);
-  // Continue supplying new detail during a long drag; never starve expensive references.
-  if (coarseReady && performance.now() - lastRender > 180) startRender();
-  else renderTimer = setTimeout(startRender, 120);
+  const now = performance.now(), idle = now - lastChange > IDLE_MS;
+  lastChange = now;
+  // Leading edge: an isolated change renders immediately instead of waiting
+  // for more. Continue supplying new detail during a long drag or zoom; never
+  // starve expensive references.
+  if (idle || (coarseReady && now - lastRender > RESTART_MS)) startRender();
+  else renderTimer = setTimeout(startRender, SETTLE_MS);
 }
 
 function createWorker(): void {
