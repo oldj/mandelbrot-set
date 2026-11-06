@@ -7,9 +7,10 @@ export function extended(re: number, im = 0, exp = 0): Extended {
   const magnitude = Math.max(Math.abs(re), Math.abs(im));
   if (magnitude === 0) return ZERO;
   const shift = Math.floor(Math.log2(magnitude));
-  // Split scaling to handle subnormal doubles too.
-  const factor = 2 ** Math.max(-1023, -shift);
-  const rest = 2 ** (-shift - Math.max(-1023, -shift));
+  // Split scaling to handle subnormal doubles too: 2^-shift alone overflows
+  // to Infinity once shift < -1023, so never form a factor above 2^1023.
+  const factor = 2 ** Math.min(1023, -shift);
+  const rest = 2 ** (-shift - Math.min(1023, -shift));
   return { re: re * factor * rest, im: im * factor * rest, exp: exp + shift };
 }
 

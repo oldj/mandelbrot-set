@@ -58,6 +58,8 @@ function project(target: CanvasRenderingContext2D, source: Surface, destination:
 
 function draw(): void {
   frame = 0;
+  // The label observer can fire before the canvas has a size (e.g. a hidden page).
+  if (!view) return;
   if (infoView !== view || infoWidth !== cssWidth || infoHeight !== cssHeight) {
     info = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
     zoomLabel.textContent = info.zoom;
@@ -226,6 +228,7 @@ function localPoint(clientX: number, clientY: number): Point {
 
 window.addEventListener('wheel', event => {
   event.preventDefault();
+  if (!view) return;
   const rect = canvas.getBoundingClientRect();
   const anchor = wheelAnchor(event.clientX, event.clientY, rect);
   view = transformView(view, anchor, anchor, wheelLogFactor(event.deltaY, event.deltaMode, cssHeight));
@@ -234,7 +237,7 @@ window.addEventListener('wheel', event => {
 
 const pointers = new Map<number, Point>();
 canvas.addEventListener('pointerdown', event => {
-  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  if (!view || (event.pointerType === 'mouse' && event.button !== 0)) return;
   event.preventDefault();
   canvas.focus({ preventScroll: true });
   canvas.setPointerCapture(event.pointerId);

@@ -6,6 +6,8 @@ import type { View } from './precision.ts';
 export const INTERIOR = -1;
 const TWO = extended(2);
 const BLA_EPSILON_BITS = 42;
+/** A reused reference may be at most 2^24 CSS pixels from the view centre. */
+const MAX_REFERENCE_OFFSET_BITS = 24;
 
 export function iterationBudget(logScale: number): number {
   return Math.ceil((800 + Math.max(0, -logScale - 8) * 32) / 512) * 512;
@@ -257,9 +259,13 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   if (entry && entry.view.bits >= view.bits && entry.limit >= limit) {
     const shift = BigInt(entry.view.bits - view.bits);
     offset = fromFixed((view.re << shift) - entry.view.re, (view.im << shift) - entry.view.im, entry.view.bits);
-    const maxLog = Math.max(logMagnitude(offset), logRadius);
-    const bound = maxLog + Math.log2(2 ** (logMagnitude(offset) - maxLog) + 2 ** (logRadius - maxLog));
-    if (bound > entry.logRadius) entry = undefined;
+    const logOffset = logMagnitude(offset);
+    const maxLog = Math.max(logOffset, logRadius);
+    const bound = maxLog + Math.log2(2 ** (logOffset - maxLog) + 2 ** (logRadius - maxLog));
+    // Pixel deltas are added to the offset in 53-bit doubles. Zooming far into
+    // an off-centre point would leave too few bits to tell pixels apart
+    // (precision bits never shrink, so `bits` alone does not invalidate it).
+    if (bound > entry.logRadius || logOffset - view.logScale > MAX_REFERENCE_OFFSET_BITS) entry = undefined;
   } else entry = undefined;
   if (!entry) {
     const paddedRadius = logRadius + 2;

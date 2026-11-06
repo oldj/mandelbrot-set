@@ -90,3 +90,23 @@ test('exact periodicity shortcut agrees with BigInt around a period-three bulb',
     close(directDouble(re, im, 8192), directFixed(toFixed(re, 256), toFixed(im, 256), 256, 8192), 1e-4);
   }
 });
+
+test('zooming far into an off-centre point rebuilds a reference even when precision bits are unchanged', async () => {
+  // Bits never shrink after zooming out, so a shallow reference must not be
+  // reused at a much finer scale where pixel deltas vanish beside its offset.
+  for (const depth of [-40, -300]) {
+    const view = ensurePrecision({ re: 0n, im: 0n, bits: 640, logScale: -45 });
+    view.re = toFixed(-2, view.bits) + scaledFixed(40, -45, view.bits);
+    const cache = {};
+    await createSampler(view, 100, 100, 3000, noop, cache);
+    const reference = cache.entry.reference;
+    const zoomed = transformView(view, { x: -40, y: 0 }, { x: -40, y: 0 }, depth);
+    assert.equal(zoomed.bits, view.bits);
+    const sampler = await createSampler(zoomed, 100, 100, 3000, noop, cache);
+    assert.notEqual(cache.entry.reference, reference);
+    for (let j = 0; j < 20; j++) {
+      const x = (j * 73 % 100) - 50, y = (j * 37 % 100) - 50;
+      close(sampler.sample(x, y), oracle(zoomed, x, y, 3000), 1e-6);
+    }
+  }
+});

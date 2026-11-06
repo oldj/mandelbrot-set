@@ -79,3 +79,9 @@ test('extended exponent preserves perturbations below 1e-1000', () => {
   assert.equal(add(delta, extended(-1, -0.5, -4000)).re, 0);
   assert.equal(logMagnitude(linear(extended(1), delta, ZERO, extended(1))), logMagnitude(delta));
 });
+
+test('extended normalization keeps subnormal doubles finite', () => {
+  assert.deepEqual(extended(Number.MIN_VALUE), { re: 1, im: 0, exp: -1074 });
+  assert.deepEqual(extended(3 * 2 ** -1070, -(2 ** -1072)), { re: 1.5, im: -0.125, exp: -1069 });
+  assert.deepEqual(add({ re: 1, im: 0, exp: -1000 }, { re: -(1 - 2 ** -52), im: 0, exp: -1000 }), { re: 1, im: 0, exp: -1052 });
+});
