@@ -52,17 +52,3 @@ test('invalid or hostile hashes are rejected', () => {
   const view = transformView(initialView(800, 600), { x: 120, y: -40 }, { x: 0, y: 0 }, -30);
   assert.ok(parseViewHash(`#${formatViewHash(view, 800, 600, initial)}`, initial));
 });
-
-import { parseColorHash } from '../src/url-state.ts';
-
-test('a locked colour boost round-trips through the hash exactly', () => {
-  const view = transformView(initialView(800, 600), { x: 120, y: -40 }, { x: 0, y: 0 }, -30), initial = initialView(800, 600).logScale;
-  const mapping = { stretch: 2 ** 2.5, anchor: 1.0123456789012345 };
-  const hash = formatViewHash(view, 800, 600, initial, mapping);
-  assert.match(hash, /&color=/);
-  assert.deepEqual(parseColorHash(`#${hash}`), mapping);
-  assert.equal(formatViewHash(view, 800, 600, initial, { stretch: 1, anchor: 0 }).includes('color='), false);
-  // The default view with a boost still needs a hash; without one it has none.
-  assert.notEqual(formatViewHash(initialView(800, 600), 800, 600, initial, mapping), '');
-  for (const bad of ['#color=1:0', '#color=abc', '#color=2', '#color=99:0', '#zoom=2']) assert.equal(parseColorHash(bad), undefined, bad);
-});

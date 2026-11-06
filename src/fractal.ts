@@ -669,4 +669,4 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   } };
 }
 
-export { color, colorWord, COLOR_PERIOD } from './palette.ts';
+export { color, colorWord, lapsOf, LAPS_PER_E_FOLD } from './palette.ts';

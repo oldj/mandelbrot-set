@@ -28,8 +28,6 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     dataset = {};
     clientWidth = 120;
     open = false;
-    attributes = {};
-    setAttribute(key, value) { this.attributes[key] = value; }
     showModal() { this.open = true; }
     close() { this.open = false; }
     addEventListener(type, callback) {
@@ -63,7 +61,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     emit(data) { this.onmessage({ data }); }
   }
   const canvas = new Canvas(), window = new Target();
-  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#reset-view', '#boost-colors', '#boost-level', '#boost-feedback', '#copy-view', '#copy-feedback', '#coordinate-dialog', '#coordinate-title', '#coordinate-full', '#close-coordinate'].map(id => [id, new Target()])]);
+  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#reset-view', '#copy-view', '#copy-feedback', '#coordinate-dialog', '#coordinate-title', '#coordinate-full', '#close-coordinate'].map(id => [id, new Target()])]);
   canvas.rect = { left: 0, top: 0, right: width, bottom: height, width, height };
   window.devicePixelRatio = dpr;
   const globals = {
@@ -457,75 +455,4 @@ test('the URL hash follows the view, restores a shared view and clears on reset'
   const before = h.request().id;
   h.location.hash = '#re=abc&im=0&zoom=2'; h.window.emit('hashchange');
   assert.equal(h.request().id, before);
-});
-
-test('colours never change on their own; a boost is locked by hand and kept while zooming and panning', () => {
-  const h = harness({ cores: 3 });
-  const boost = h.elements.get('#boost-colors'), feedback = h.elements.get('#boost-feedback');
-  const active = id => h.workers.filter(worker => worker.messages.at(-1).id === id && !worker.messages.at(-1).type);
-  const coarse = (id, values) => {
-    for (const worker of active(id)) worker.emit({ type: 'pass', id, step: 8, elapsed: 1, fallbacks: 0, samples: values.length, unresolved: 0, coarse: Float32Array.from(values) });
-  };
-  const narrow = Array.from({ length: 2000 }, (_, i) => 1360 + 130 * ((i * 0.618) % 1) ** 3);
-  h.flushFrames();
-  assert.equal(boost.hidden, true, 'not offered for shallow views');
-  for (let i = 0; i < 12; i++) h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -600, deltaMode: 0 });
-  h.flush(); h.flushFrames();
-  assert.equal(boost.hidden, false, 'offered beyond 2^10');
-  const deep = h.request();
-  coarse(deep.id, narrow);
-  assert.equal(h.request().id, deep.id, 'no automatic recolouring');
-  assert.equal(h.request().mapping.stretch, 1);
-  // Pressing C locks a boost chosen from this view's finished coarse pass.
-  h.window.emit('keydown', { key: 'c' });
-  const boosted = h.request();
-  assert.equal(boosted.id, deep.id + 1);
-  assert.ok(boosted.mapping.stretch > 1);
-  assert.match(feedback.textContent, /已增强色彩/);
-  h.flush(); h.flushFrames();
-  assert.equal(boost.attributes['aria-pressed'], 'true');
-  assert.match(h.elements.get('#boost-level').textContent, /×\d/);
-  assert.match(h.location.hash, /&color=[\d.]+:[\d.]+$/);
-  // Zooming and panning keep the locked density (the same point keeps its colour).
-  h.window.emit('wheel', { clientX: 300, clientY: 200, deltaY: -600, deltaMode: 0 }); h.flush();
-  assert.deepEqual(h.request().mapping, boosted.mapping);
-  coarse(h.request().id, Array.from({ length: 2000 }, (_, i) => i % 400));
-  assert.deepEqual(h.request().mapping, boosted.mapping, 'a different view does not re-choose it');
-  // A shared link carries the boost.
-  const other = harness({ hash: h.location.hash });
-  assert.deepEqual(other.request().mapping, boosted.mapping);
-  // Pressing again returns to the animation's colouring, and drops it from the link.
-  boost.emit('click');
-  assert.equal(h.request().mapping.stretch, 1);
-  assert.match(feedback.textContent, /恢复原图配色/);
-  assert.doesNotMatch(h.location.hash, /color=/);
-});
-
-test('boosting a varied view changes nothing; a boost asked mid-render waits for a full coarse pass', () => {
-  const h = harness({ cores: 3 });
-  const feedback = h.elements.get('#boost-feedback');
-  const active = id => h.workers.filter(worker => worker.messages.at(-1).id === id && !worker.messages.at(-1).type);
-  const coarse = (id, values) => {
-    for (const worker of active(id)) worker.emit({ type: 'pass', id, step: 8, elapsed: 1, fallbacks: 0, samples: values.length, unresolved: 0, coarse: Float32Array.from(values) });
-  };
-  for (let i = 0; i < 12; i++) h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -600, deltaMode: 0 });
-  h.flush();
-  const varied = Array.from({ length: 3000 }, (_, i) => i % 7 === 0 ? -1 : 20 + (i % 600));
-  // Asked before the coarse pass finished: a full render is requested and the boost follows its coarse pass.
-  const first = h.request();
-  h.window.emit('keydown', { key: 'C' });
-  const analysing = h.request();
-  assert.equal(analysing.id, first.id + 1);
-  assert.equal(analysing.regions.length, 1, 'every pixel, no pan reuse');
-  assert.match(feedback.textContent, /正在分析/);
-  coarse(analysing.id, varied);
-  assert.equal(h.request().id, analysing.id, 'already varied: nothing to boost');
-  assert.match(feedback.textContent, /已足够丰富/);
-  assert.equal(h.request().mapping.stretch, 1);
-  // Home forgets any boost.
-  coarse(analysing.id, varied);
-  h.window.emit('keydown', { key: 'c' });
-  h.window.emit('keydown', { key: 'Home' });
-  assert.equal(h.request().mapping.stretch, 1);
-  assert.equal(h.location.hash, '');
 });

@@ -1,5 +1,4 @@
 import { colorWord, computeOrbit, createSampler, EXTENDED_LOG_SCALE, referenceFromOrbit } from './fractal.ts';
-import { ANIMATION_MAPPING } from './palette.ts';
 import type { ReferenceCache, ReferenceEntry } from './fractal';
 import type { OrbitData, ReferenceSpec } from './reference';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
@@ -113,7 +112,6 @@ async function render(request: RenderRequest): Promise<void> {
     batch = []; transfer = []; lastFlush = performance.now();
   };
   const { reference } = request;
-  const mapping = request.mapping ?? ANIMATION_MAPPING;
   const source = reference && (() => sharedReference(reference));
   const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
   // Each worker owns fixed spatial tiles through every pass. A block is sampled
@@ -138,7 +136,6 @@ async function render(request: RenderRequest): Promise<void> {
   for (const step of [8, 4, 2, 1]) {
     let samples = 0;
     const unresolvedBefore = sampler?.stats.unresolved ?? 0;
-    const coarse: number[] = [];
     for (const tile of tiles) {
       await checkpoint();
       const columns = Math.ceil(tile.width / step), rows = Math.ceil(tile.height / step);
@@ -159,8 +156,7 @@ async function render(request: RenderRequest): Promise<void> {
         if (count) {
           if (sampler!.row) sampler!.row(xs, count, y, values);
           else for (let k = 0; k < count; k++) values[k] = sampler!.sample(xs[k], y);
-          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = colorWord(values[k], mapping);
-          if (step === 8) for (let k = 0; k < count; k++) coarse.push(values[k]);
+          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = colorWord(values[k]);
         }
         samples += count;
         await checkpoint();
@@ -175,8 +171,7 @@ async function render(request: RenderRequest): Promise<void> {
     }
     await checkpoint();
     flush();
-    const counts = step === 8 ? Float32Array.from(coarse) : undefined;
     send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
-      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore, coarse: counts }, counts ? [counts.buffer] : []);
+      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore });
   }
 }
