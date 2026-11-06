@@ -57,7 +57,11 @@ export function logMagnitude(a: Extended): number {
 export function fromFixed(re: bigint, im: bigint, bits: number): Extended {
   const ar = re < 0n ? -re : re;
   const ai = im < 0n ? -im : im;
-  const size = (ar > ai ? ar : ai).toString(2).length;
+  const larger = ar > ai ? ar : ai;
+  // Bit length without printing thousands of binary digits: shift magnitudes
+  // near 1 down to ~64 bits first; only tiny values need the full string.
+  const guess = bits - 64, high = guess > 0 ? larger >> BigInt(guess) : 0n;
+  const size = high > 0n ? guess + high.toString(2).length : larger.toString(2).length;
   const shift = Math.max(0, size - 53);
   return extended(Number(ar >> BigInt(shift)) * (re < 0n ? -1 : 1),
     Number(ai >> BigInt(shift)) * (im < 0n ? -1 : 1), shift - bits);

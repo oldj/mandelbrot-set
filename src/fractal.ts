@@ -269,6 +269,8 @@ export interface Reference {
    * skips the whole lookup, the common case on long, poorly skippable orbits.
    */
   firstRadiusSquared: Float64Array;
+  /** |Z_m|² · 1e-14: below this |z|² has lost too many bits to cancellation (a glitch). */
+  glitch: Float64Array;
   /** Extended-exponent orbit and BLA tables, only built for views that need them (below 2^-900). */
   orbit?: Extended[];
   levels?: (BLA | undefined)[][];
@@ -282,15 +284,18 @@ export async function computeOrbit(view: View, limit: number, checkpoint: Checkp
   const data = { re: new Float64Array(limit + 1), im: new Float64Array(limit + 1), exp: new Float64Array(limit + 1) };
   const shift = BigInt(view.bits);
   const bailout = 256n << (shift * 2n);
-  let re = 0n, im = 0n, length = 1;
+  const half = shift - 1n;
+  // The squares of z serve both the escape test and the next step: three
+  // multiplications per iteration instead of five, with identical values.
+  let re = 0n, im = 0n, r2 = 0n, i2 = 0n, length = 1;
   for (let n = 1; n <= limit; n++) {
-    const r2 = re * re, i2 = im * im;
-    im = ((2n * re * im) >> shift) + view.im;
+    im = ((re * im) >> half) + view.im;
     re = ((r2 - i2) >> shift) + view.re;
     const z = fromFixed(re, im, view.bits);
     data.re[n] = z.re; data.im[n] = z.im; data.exp[n] = z.exp;
     length = n + 1;
-    if (re * re + im * im > bailout) break;
+    r2 = re * re; i2 = im * im;
+    if (r2 + i2 > bailout) break;
     if (n % 128 === 0) await checkpoint();
   }
   return { re: data.re.slice(0, length), im: data.im.slice(0, length), exp: data.exp.slice(0, length) };
@@ -344,7 +349,9 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
   }
   const firstRadiusSquared = new Float64Array(length);
   for (let i = 0; i < first.length; i++) firstRadiusSquared[i + 1] = native[0][i * NATIVE_FIELDS + 4];
-  return { real, imag, native, firstRadiusSquared,
+  const glitch = new Float64Array(length);
+  for (let i = 0; i < length; i++) glitch[i] = (real[i] * real[i] + imag[i] * imag[i]) * 1e-14;
+  return { real, imag, native, firstRadiusSquared, glitch,
     orbit: extended ? Array.from({ length }, (_, i) => point(i)) : undefined, levels };
 }
 
@@ -415,9 +422,13 @@ const ROUNDING = 2 ** -50;
  * and attempts are capped so they never more than double a pixel's work.
  */
 function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: number, fallback: () => number, stats: SampleStats): number {
-  let dr = 0, di = 0, m = 0, n = 0;
+  const real = reference.real, imag = reference.imag, first = reference.firstRadiusSquared, glitch = reference.glitch;
+  const end = real.length - 1;
+  // zr, zi always hold Z_m; deltaSquared holds |δ|² for the current δ.
+  let dr = 0, di = 0, m = 0, n = 0, zr = real[0], zi = imag[0], deltaSquared = 0;
   // Interior proof state: the base is the smallest |z| since the last reset.
-  let baseRe = 0, baseIm = 0, baseSquared = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
+  // Above `far`, |z|² is certainly outside the band around |base|²: nothing to track.
+  let baseRe = 0, baseIm = 0, baseSquared = Infinity, far = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
   // Proof state; ra..rd bound the disk images for four starting radii (radius0 x 1, 2^8, 2^16, 2^24).
   let verify = 0, spent = 0, steps = 0, startRe = 0, startIm = 0, startError = 0, radius0 = 0;
   let ra = 0, rb = 0, rc = 0, rd = 0;
@@ -425,8 +436,8 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
   while (n < limit) {
     steps++;
     // Level 0 has the largest radius at m; >= also rejects squared deltas that underflow to 0.
-    const quick = reference.firstRadiusSquared[m];
-    const level = verify || !(quick >= 1e-280 ? dr * dr + di * di < quick : quick > 0)
+    const quick = first[m];
+    const level = verify || !(quick >= 1e-280 ? deltaSquared < quick : quick > 0)
       ? -1 : lookupNative(reference, m, dr, di, limit - n);
     const skipped = level >= 0;
     if (skipped) {
@@ -437,7 +448,6 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
       dr = nextRe;
       m += length; n += length; stats.skipped += length - 1;
     } else {
-      const zr = reference.real[m], zi = reference.imag[m];
       if (verify) {
         const reference = Math.hypot(zr, zi), delta = Math.hypot(dr, di);
         const twice = 2 * Math.hypot(zr + dr, zi + di), rounding = ROUNDING * (4 * reference * delta + delta * delta) + dcError;
@@ -449,15 +459,15 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
       dr = nextRe;
       m++; n++;
     }
-    const zr = reference.real[m], zi = reference.imag[m];
+    zr = real[m]; zi = imag[m];
     const totalRe = zr + dr, totalIm = zi + di;
     const squared = totalRe * totalRe + totalIm * totalIm;
-    if (!Number.isFinite(squared)) return fallback();
-    if (squared > 256) return smooth(n, 0.5 * Math.log2(squared));
+    if (!(squared <= 256)) return Number.isFinite(squared) ? smooth(n, 0.5 * Math.log2(squared)) : fallback();
+    deltaSquared = dr * dr + di * di;
     let rebase: boolean;
     if (squared >= 1e-280) {
-      if (squared < (zr * zr + zi * zi) * 1e-14) return fallback();
-      rebase = squared < dr * dr + di * di;
+      if (squared < glitch[m]) return fallback();
+      rebase = squared < deltaSquared;
     } else {
       const radius = Math.hypot(totalRe, totalIm);
       if (radius < Math.hypot(zr, zi) * 1e-7) return fallback();
@@ -472,12 +482,12 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
           || distance + rc <= radius0 * 2 ** 16 || distance + rd <= radius0 * 2 ** 24) return INTERIOR;
         // Failed: relearn the base from scratch, and back off so orbits that
         // linger near a repelling cycle cannot keep switching BLA off.
-        baseSquared = Infinity; collapsedBase = false; retry = 2 * n;
+        baseSquared = far = Infinity; collapsedBase = false; retry = 2 * n;
       } else if (rebase) { ra += error; rb += error; rc += error; rd += error; }
-    } else if (!skipped && squared >= 1e-280) {
+    } else if (!skipped && squared >= 1e-280 && (squared <= far || n >= reset)) {
       // Returns and collapses happen near z = 0, where BLA cannot apply: track
       // single steps only. A return within 2^-10 of the base needs |z|² within
-      // ~2^-9 of |base|², so most steps cost one subtraction and comparison.
+      // ~2^-9 of |base|², so most steps stop at the `far` test above.
       // A proof starts on a close return, or on a second consecutive collapse
       // of |z| far below the base (super-attracting cycles shrink faster than
       // any fixed gap; two collapses in a row measure a true period). Proof
@@ -487,15 +497,9 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
       const collapse = !near && squared < TRAP_RETURN_SQUARED * baseSquared;
       let start = false, distanceSquared = 0;
       if ((near || (collapse && collapsedBase)) && n >= retry && n >= PROOF_START && n - baseN > 2 && spent + n - baseN <= steps) {
-        if (near) {
-          const ex = totalRe - baseRe, ey = totalIm - baseIm;
-          distanceSquared = ex * ex + ey * ey;
-          start = distanceSquared < TRAP_RETURN_SQUARED * baseSquared;
-        } else {
-          const ex = totalRe - baseRe, ey = totalIm - baseIm;
-          distanceSquared = ex * ex + ey * ey;
-          start = true;
-        }
+        const ex = totalRe - baseRe, ey = totalIm - baseIm;
+        distanceSquared = ex * ex + ey * ey;
+        start = !near || distanceSquared < TRAP_RETURN_SQUARED * baseSquared;
       }
       if (start) {
         verify = n - baseN; spent += verify;
@@ -508,10 +512,13 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
         if (n >= reset) reset *= 2;
         collapsedBase = collapse;
         baseRe = totalRe; baseIm = totalIm; baseSquared = squared; baseN = n;
+        // Strictly beyond the band even after rounding: relative > 2^-8 |base|² there.
+        far = squared * (1 + 2 * TRAP_BAND);
       }
     }
-    if (rebase || m === reference.real.length - 1) {
-      dr = totalRe; di = totalIm; m = 0;
+    if (rebase || m === end) {
+      dr = totalRe; di = totalIm; m = 0; zr = real[0]; zi = imag[0];
+      deltaSquared = squared;
     }
   }
   stats.unresolved++;
@@ -662,4 +669,4 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   } };
 }
 
-export { color, COLOR_PERIOD } from './palette.ts';
+export { color, colorWord, COLOR_PERIOD } from './palette.ts';

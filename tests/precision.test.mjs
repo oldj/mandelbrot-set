@@ -94,3 +94,23 @@ test('the default view is recognised exactly, even at higher stored precision', 
   assert.ok(!isInitialView(transformView(view, { x: 0, y: 0 }, { x: 0, y: 0 }, -0.01), 800, 600), 'a tiny zoom counts');
   assert.ok(!isInitialView(view, 800, 700), 'a window with another fitting scale has a different default');
 });
+
+import { fromFixed } from '../src/extended.ts';
+
+test('fixed-point conversion matches the exact bit-length algorithm at every magnitude', () => {
+  const reference = (re, im, bits) => {
+    const ar = re < 0n ? -re : re, ai = im < 0n ? -im : im;
+    const shift = Math.max(0, (ar > ai ? ar : ai).toString(2).length - 53);
+    return extended(Number(ar >> BigInt(shift)) * (re < 0n ? -1 : 1), Number(ai >> BigInt(shift)) * (im < 0n ? -1 : 1), shift - bits);
+  };
+  for (const bits of [40, 64, 65, 200, 3136]) {
+    for (const exponent of [-3000, -100, -70, -64, -63, -1, 0, 3, 4]) {
+      if (bits + exponent < 0) continue;
+      for (const [a, b] of [[1n, 0n], [-3n, 5n], [123456789n, -987654321n], [0n, -1n]]) {
+        const re = a << BigInt(bits + exponent), im = b << BigInt(bits + exponent);
+        assert.deepEqual(fromFixed(re + 7n, im - 3n, bits), reference(re + 7n, im - 3n, bits));
+      }
+    }
+  }
+  assert.deepEqual(fromFixed(0n, 0n, 128), ZERO);
+});

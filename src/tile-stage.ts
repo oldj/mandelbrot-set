@@ -37,12 +37,28 @@ export class TileStage {
     const source = new Uint32Array(tile.pixels.buffer, tile.pixels.byteOffset, tile.width * tile.height);
     const { step } = tile;
     const regions = claimTile(quality, this.width, { x: tile.x, y: tile.y, width, height }, step);
+    const words = this.words;
     for (const region of regions) {
       const start = region.x - tile.x, end = start + region.width;
       for (let y = region.y; y < region.y + region.height; y++) {
-        const row = Math.floor((y - tile.y) / step) * tile.width, out = y * this.width + tile.x;
-        if (step === 1) this.words.set(source.subarray(row + start, row + end), out + start);
-        else for (let x = start; x < end; x++) this.words[out + x] = source[row + Math.floor(x / step)];
+        const sampleRow = Math.floor((y - tile.y) / step), row = sampleRow * tile.width, out = y * this.width + tile.x;
+        if (step === 1) { words.set(source.subarray(row + start, row + end), out + start); continue; }
+        // Rows within one coarse block are identical: copy the row above when it is part of the region.
+        if (y > region.y && Math.floor((y - 1 - tile.y) / step) === sampleRow) {
+          words.copyWithin(out + start, out - this.width + start, out - this.width + end);
+          continue;
+        }
+        if (step === 2) {
+          // fill() costs more than it saves for two-pixel runs.
+          for (let x = start; x < end; x++) words[out + x] = source[row + (x >> 1)];
+          continue;
+        }
+        let x = start;
+        while (x < end) {
+          const sample = Math.floor(x / step), stop = Math.min(end, (sample + 1) * step);
+          words.fill(source[row + sample], out + x, out + stop);
+          x = stop;
+        }
       }
       this.left = Math.min(this.left, region.x);
       this.top = Math.min(this.top, region.y);

@@ -48,9 +48,19 @@ export function missingRegions(quality: Uint8Array, width: number, height: numbe
   return regionsWhere(quality, width, { x: 0, y: 0, width, height }, value => value !== 1);
 }
 
+/** Whether every pixel of the bounds has a quality value of at least `step`. */
+function allAtLeast(quality: Uint8Array, stride: number, bounds: RenderRegion, step: number): boolean {
+  for (let y = bounds.y; y < bounds.y + bounds.height; y++) {
+    for (let i = y * stride + bounds.x, end = i + bounds.width; i < end; i++) if (quality[i] < step) return false;
+  }
+  return true;
+}
+
 /** Clip late coarse results around both reused and newly completed fine pixels. */
 export function claimTile(quality: Uint8Array, stride: number, bounds: RenderRegion, step: number): RenderRegion[] {
-  const regions = step === 1 ? [bounds] : regionsWhere(quality, stride, bounds, value => value >= step);
+  // Usually nothing finer has landed yet: claim the whole tile without merging runs.
+  const regions = step === 1 || allAtLeast(quality, stride, bounds, step) ? [bounds]
+    : regionsWhere(quality, stride, bounds, value => value >= step);
   for (const region of regions) for (let y = region.y; y < region.y + region.height; y++) {
     quality.fill(step, y * stride + region.x, y * stride + region.x + region.width);
   }

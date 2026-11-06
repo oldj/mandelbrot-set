@@ -1,4 +1,4 @@
-import { color, computeOrbit, createSampler, EXTENDED_LOG_SCALE, referenceFromOrbit } from './fractal.ts';
+import { colorWord, computeOrbit, createSampler, EXTENDED_LOG_SCALE, referenceFromOrbit } from './fractal.ts';
 import type { ReferenceCache, ReferenceEntry } from './fractal';
 import type { OrbitData, ReferenceSpec } from './reference';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
@@ -12,6 +12,19 @@ const FLUSH_MS = 16;
 const TILE_SIZE = 32;
 interface OwnTile { x: number; y: number; width: number; height: number; previous?: Uint32Array; previousColumns: number }
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
+
+/**
+ * Let queued messages (new requests, cancels, orbits) run. setTimeout(0) is
+ * clamped to >= 4 ms once nested, which left workers idle for a third of the
+ * time between 8 ms work slices; a self-posted message has no such clamp.
+ */
+const yieldChannel = new MessageChannel();
+const yieldWaiters: (() => void)[] = [];
+yieldChannel.port1.onmessage = () => yieldWaiters.shift()?.();
+const yieldToEvents = () => new Promise<void>(resolve => {
+  yieldWaiters.push(resolve);
+  yieldChannel.port2.postMessage(0);
+});
 
 // Shared reference state. Work on a reference is tied to its key, not to one
 // render: a newer request for the same key continues it instead of restarting.
@@ -41,7 +54,7 @@ function referenceCheckpoint(key: number) {
   return async () => {
     if (wantedKey !== key) throw CANCELLED;
     if (performance.now() - lastYield < 8) return;
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await yieldToEvents();
     lastYield = performance.now();
     if (wantedKey !== key) throw CANCELLED;
   };
@@ -87,7 +100,7 @@ async function render(request: RenderRequest): Promise<void> {
   const checkpoint = async () => {
     if (generation !== request.id) throw CANCELLED;
     if (performance.now() - lastYield < 8) return;
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await yieldToEvents();
     lastYield = performance.now();
     if (generation !== request.id) throw CANCELLED;
   };
@@ -142,7 +155,7 @@ async function render(request: RenderRequest): Promise<void> {
         if (count) {
           if (sampler!.row) sampler!.row(xs, count, y, values);
           else for (let k = 0; k < count; k++) values[k] = sampler!.sample(xs[k], y);
-          for (let k = 0; k < count; k++) color(values[k], pixels, (row * columns + targets[k]) * 4);
+          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = colorWord(values[k]);
         }
         samples += count;
         await checkpoint();

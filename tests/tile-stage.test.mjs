@@ -42,3 +42,20 @@ test('tiles past the surface edge are ignored', () => {
   assert.deepEqual(stage.add(tile(8, 0, 4, 4, 1, 1), quality), []);
   assert.equal(stage.dirty, false);
 });
+
+test('every coarse step expands identically to per-pixel expansion, also around claimed pixels', () => {
+  for (const step of [2, 4, 8]) {
+    const stage = new TileStage(37, 29), quality = new Uint8Array(37 * 29).fill(255);
+    // A finer pixel block already landed inside the tile: it must be skipped.
+    stage.add(tile(8, 8, 5, 5, 1, 0xfeed), quality);
+    const columns = Math.ceil(32 / step), coarse = tile(0, 0, columns, columns, step, 0, { clipWidth: 32, clipHeight: 29 });
+    const words = new Uint32Array(coarse.pixels.buffer);
+    words.forEach((_, i) => { words[i] = 1000 + i; });
+    stage.add(coarse, quality);
+    for (let y = 0; y < 29; y++) for (let x = 0; x < 37; x++) {
+      const fine = x >= 8 && x < 13 && y >= 8 && y < 13;
+      const expected = x >= 32 ? 0 : fine ? 0xfeed : 1000 + Math.floor(y / step) * columns + Math.floor(x / step);
+      assert.equal(word(stage, x, y), expected, `step ${step} at ${x},${y}`);
+    }
+  }
+});

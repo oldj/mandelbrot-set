@@ -78,19 +78,41 @@ for (let i = 0; i <= SIZE; i++) {
   }
 }
 
-export function color(value: number, pixels: Uint8ClampedArray, offset: number): void {
-  // Only -1 is the sampler's interior sentinel. Far-away escaping points can
-  // have other negative smooth counts and must retain the exterior colour.
-  if (value === -1) {
-    pixels[offset] = pixels[offset + 1] = pixels[offset + 2] = 0;
-  } else {
-    const phase = escapePhase(value);
-    const position = (phase % CYCLE) / CYCLE * SIZE;
-    const index = Math.floor(position), blend = position - index;
+// Packed RGBA words at four times the table resolution: one lookup per pixel
+// instead of three interpolated channels (within one level of interpolating).
+const FINE = SIZE * 4;
+const packed = new Uint32Array(FINE);
+{
+  const pixel = new Uint8ClampedArray(4), word = new Uint32Array(pixel.buffer);
+  for (let i = 0; i < FINE; i++) {
+    const position = i / FINE * SIZE, index = Math.floor(position), blend = position - index;
     for (let channel = 0; channel < 3; channel++) {
       const from = table[index * 3 + channel], to = table[(index + 1) * 3 + channel];
-      pixels[offset + channel] = from + (to - from) * blend;
+      pixel[channel] = from + (to - from) * blend;
     }
+    pixel[3] = 255;
+    packed[i] = word[0];
   }
-  pixels[offset + 3] = 255;
+}
+const INTERIOR_WORD = new Uint32Array(new Uint8ClampedArray([0, 0, 0, 255]).buffer)[0];
+const END_OFFSET = (END_PHASE % CYCLE) / CYCLE;
+
+/** The pixel colour as a packed RGBA word (platform byte order, as a Uint32Array view of RGBA bytes). */
+export function colorWord(value: number): number {
+  // Only -1 is the sampler's interior sentinel. Far-away escaping points can
+  // have other negative smooth counts and must retain the exterior colour.
+  if (value === -1) return INTERIOR_WORD;
+  // Deep counts: reduce exactly by the period first (so it repeats exactly),
+  // then one floor replaces the second modulo.
+  let turn = value >= TRANSITION_END
+    ? END_OFFSET + ((value - TRANSITION_END) % COLOR_PERIOD) / COLOR_PERIOD
+    : escapePhase(value) / CYCLE;
+  turn -= Math.floor(turn);
+  return packed[Math.min(FINE - 1, Math.floor(turn * FINE))];
+}
+
+const scratch = new Uint32Array(1), scratchBytes = new Uint8Array(scratch.buffer);
+export function color(value: number, pixels: Uint8ClampedArray, offset: number): void {
+  scratch[0] = colorWord(value);
+  pixels.set(scratchBytes, offset);
 }
