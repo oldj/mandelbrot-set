@@ -255,3 +255,25 @@ test('slowly settling interiors are proved by their attracting cycle, soundly, n
   }
   assert.ok(proven > 10 && escaped >= 4, `samples on both sides (${proven} proved, ${escaped} escaped)`);
 });
+
+test('interior proofs seeded by a neighbour\'s cycle do not depend on the order pixels are sampled in', async () => {
+  // Each proved pixel hands its cycle point to the next; a proof from any start is valid, and a failed
+  // one falls back to iterating, so every result must be identical forwards and backwards.
+  const { parseViewHash } = await import('../src/url-state.ts');
+  const { initialView } = await import('../src/precision.ts');
+  const view = parseViewHash('#re=-0.73088326955313741591&im=0.24781738096196057252&zoom=4.171992716e13', initialView(1280, 800).logScale);
+  const xs = Array.from({ length: 64 }, (_, i) => -630 + i * 19.9);
+  const run = async order => {
+    const sampler = await createSampler(view, 1280, 800, 20000, noop);
+    const results = new Map();
+    for (const x of order) results.set(x, [sampler.sample(x, -216), lastDistance()]);
+    return { values: xs.map(x => results.get(x)), unresolved: sampler.stats.unresolved };
+  };
+  const forwards = await run(xs), backwards = await run([...xs].reverse());
+  forwards.values.forEach((result, i) => {
+    assert.ok(Object.is(result[0], backwards.values[i][0]) && Object.is(result[1], backwards.values[i][1]), `x = ${xs[i]}`);
+  });
+  const interior = forwards.values.filter(([value]) => value === INTERIOR).length;
+  assert.ok(interior > 10 && interior < xs.length - 5, `both sides of the boundary (${interior} interior)`);
+  assert.ok(forwards.unresolved < interior / 2, `most interior samples are proved (${forwards.unresolved} of ${interior} unresolved)`);
+});

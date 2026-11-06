@@ -449,6 +449,16 @@ const ROUNDING = 2 ** -50;
  * next: escaping orbits keep passing near repelling cycles.
  */
 const NEWTON_RETURN_SQUARED = 2 ** -2, NEWTON_BAND = 2 ** -2, NEWTON_COST = 3, NEWTON_PASSES = 10;
+/**
+ * The cycle point of the last successful attractingCycle proof. Neighbouring
+ * interior pixels share the component, so its period, and a cycle point that
+ * moves continuously with c: the next pixel tries the proof from there first
+ * (at most HINT_PASSES laps) before iterating at all. Any start point gives a
+ * valid proof, and a failure leaves the pixel to the usual path, so results
+ * do not depend on the order pixels are sampled in.
+ */
+const provedCycle = { found: false, m: 0, sr: 0, si: 0, period: 0 };
+const HINT_PASSES = 4;
 
 /**
  * Interior proof by an attracting cycle. The orbit of an interior point can
@@ -466,10 +476,10 @@ const NEWTON_RETURN_SQUARED = 2 ** -2, NEWTON_BAND = 2 ** -2, NEWTON_COST = 3, N
  * single steps. Returns the steps spent, negated when the proof succeeded.
  */
 function attractingCycle(reference: Reference, m0: number, sr: number, si: number, dcRe: number, dcIm: number,
-  period: number, dcError: number): number {
+  period: number, dcError: number, passes = NEWTON_PASSES): number {
   const real = reference.real, imag = reference.imag, end = real.length - 1;
   let spent = 0, radius0 = 0, previousStep = Infinity;
-  for (let pass = 0; pass < NEWTON_PASSES; pass++) {
+  for (let pass = 0; pass < passes; pass++) {
     // One lap from w = Z_m0 + s: f^P(w), its derivative D = (f^P)'(w), and,
     // after the first pass, bounds ra..rd on the images of D(w, r) for four
     // radii, as in perturbNative. The reference values' own rounding only
@@ -510,7 +520,10 @@ function attractingCycle(reference: Reference, m0: number, sr: number, si: numbe
       const error = ROUNDING * (Math.sqrt(real[m] * real[m] + imag[m] * imag[m]) + Math.sqrt(dr * dr + di * di));
       const distance = Math.sqrt(gr * gr + gi * gi) + startError + error;
       if (distance + ra < radius0 || distance + rb < radius0 * 16 || distance + rc < radius0 * 256
-        || distance + rd < radius0 * 4096) return -spent;
+        || distance + rd < radius0 * 4096) {
+        provedCycle.found = true; provedCycle.m = m0; provedCycle.sr = sr; provedCycle.si = si; provedCycle.period = period;
+        return -spent;
+      }
     }
     // Newton for g(w) = f^P(w) - w: w -= g / (D - 1). Stop on a nearly
     // converged repelling cycle (wrong period, or c outside; within 2^-8 the
@@ -848,6 +861,7 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   const mantissa = 2 ** (view.logScale - exponent);
   const scale = 2 ** view.logScale;
   const offsetRe = offset.re * 2 ** offset.exp, offsetIm = offset.im * 2 ** offset.exp;
+  let hint: { m: number; sr: number; si: number; period: number } | undefined;
   return { stats, sample(x, y) {
     // Fixed-point is only used per pixel for exact interior tests or detected glitches.
     distance = NaN;
@@ -864,9 +878,20 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
       coordinates(); stats.fallbacks++;
       return directFixed(cr!, ci!, view.bits, limit);
     };
-    return native
-      ? perturbNative(reference, offsetRe + x * scale, offsetIm - y * scale, limit, fallback, stats, scale)
-      : perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats, view.logScale);
+    if (!native) return perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats, view.logScale);
+    const dcRe = offsetRe + x * scale, dcIm = offsetIm - y * scale;
+    provedCycle.found = false;
+    if (hint) {
+      // The neighbour's attracting cycle, refined for this c: interior without iterating the orbit.
+      if (attractingCycle(reference, hint.m, hint.sr, hint.si, dcRe, dcIm, hint.period, ROUNDING * Math.hypot(dcRe, dcIm), HINT_PASSES) < 0) {
+        hint = { ...provedCycle };
+        return INTERIOR;
+      }
+      hint = undefined;
+    }
+    const value = perturbNative(reference, dcRe, dcIm, limit, fallback, stats, scale);
+    if (value === INTERIOR && provedCycle.found) hint = { ...provedCycle };
+    return value;
   } };
 }
 
