@@ -4,6 +4,7 @@ import type { Point, View } from './precision';
 import { iterationBudget } from './fractal';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
+import { claimTile, missingRegions, panRaster, shiftQuality } from './raster-cache';
 import type { RenderMessage, RenderRequest } from './types';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
@@ -41,7 +42,6 @@ const workerCount = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4)
 interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number }
 let surface: Surface | undefined;
 let quality = new Uint8Array();
-let qualityColumns = 0;
 const tileCanvas = document.createElement('canvas');
 const tileContext = tileCanvas.getContext('2d', { alpha: false })!;
 
@@ -83,13 +83,13 @@ function draw(): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#050914';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  if (surface && surface.view.re === view.re && surface.view.im === view.im
-    && surface.view.bits === view.bits && surface.view.logScale === view.logScale
+  if (surface && surface.view.logScale === view.logScale
     && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight
     && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height) {
-    // At rest, copy physical pixels 1:1. Only gesture previews need interpolation.
+    // Pure pans use integer physical pixels, never repeatedly resample the cache.
+    const offset = viewOffset(surface.view, view);
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(surface.canvas, 0, 0);
+    ctx.drawImage(surface.canvas, Math.round(offset.x * canvas.width / cssWidth), Math.round(offset.y * canvas.height / cssHeight));
     return;
   }
   ctx.setTransform(canvas.width / cssWidth, 0, 0, canvas.height / cssHeight, 0, 0);
@@ -110,16 +110,31 @@ coordinateObserver.observe(imaginaryLabel);
 
 function startRender(): void {
   clearTimeout(renderTimer);
+  const pan = surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight
+    && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
+    ? panRaster(surface.view, view, canvas.width, canvas.height, cssWidth, cssHeight) : undefined;
+  // A release or subpixel movement need not cancel useful work already in flight.
+  if (pan && pan.dx === 0 && pan.dy === 0 && canvas.dataset.rendered !== 'error') {
+    scheduleDraw();
+    return;
+  }
   const image = document.createElement('canvas');
   image.width = canvas.width; image.height = canvas.height;
   const imageContext = image.getContext('2d', { alpha: false })!;
   imageContext.fillStyle = '#050914';
   imageContext.fillRect(0, 0, image.width, image.height);
-  imageContext.setTransform(image.width / cssWidth, 0, 0, image.height / cssHeight, 0, 0);
-  if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
-  surface = { canvas: image, view: { ...view }, cssWidth, cssHeight };
-  qualityColumns = Math.ceil(image.width / 32);
-  quality = new Uint8Array(qualityColumns * Math.ceil(image.height / 32)).fill(255);
+  if (pan && surface) {
+    imageContext.imageSmoothingEnabled = false;
+    imageContext.drawImage(surface.canvas, pan.dx, pan.dy);
+    quality = shiftQuality(quality, image.width, image.height, pan.dx, pan.dy);
+  } else {
+    imageContext.setTransform(image.width / cssWidth, 0, 0, image.height / cssHeight, 0, 0);
+    if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
+    quality = new Uint8Array(image.width * image.height).fill(255);
+  }
+  const regions = pan ? missingRegions(quality, image.width, image.height)
+    : [{ x: 0, y: 0, width: image.width, height: image.height }];
+  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight };
   generation++;
   lastRender = performance.now();
   coarseReady = false;
@@ -130,9 +145,12 @@ function startRender(): void {
   canvas.dataset.logScale = String(view.logScale);
   const iterations = iterationBudget(view.logScale);
   canvas.dataset.iterations = String(iterations);
+  const renderPixels = regions.reduce((sum, region) => sum + region.width * region.height, 0);
+  canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
+  canvas.dataset.computePixels = String(renderPixels);
   workers.forEach((worker, workerIndex) => {
-    worker.postMessage({ id: generation, view, width: image.width, height: image.height,
-      cssWidth, cssHeight, workerIndex, workerCount, iterations } satisfies RenderRequest);
+    worker.postMessage({ id: generation, view: surface!.view, width: image.width, height: image.height,
+      cssWidth, cssHeight, workerIndex, workerCount, iterations, regions } satisfies RenderRequest);
   });
   scheduleDraw();
 }
@@ -176,17 +194,11 @@ for (let i = 0; i < workerCount; i++) {
     destination.setTransform(1, 0, 0, 1, 0, 0);
     destination.imageSmoothingEnabled = false;
     // Workers finish passes independently. A late coarse tile must never erase finer pixels.
-    const right = Math.min(surface.canvas.width, data.x + data.width * data.step);
-    const bottom = Math.min(surface.canvas.height, data.y + data.height * data.step);
-    for (let y = data.y; y < bottom; y += 32) {
-      for (let x = data.x; x < right; x += 32) {
-        const index = Math.floor(y / 32) * qualityColumns + Math.floor(x / 32);
-        if (quality[index] < data.step) continue;
-        quality[index] = data.step;
-        const width = Math.min(32, right - x), height = Math.min(32, bottom - y);
-        destination.drawImage(tileCanvas, (x - data.x) / data.step, (y - data.y) / data.step,
-          width / data.step, height / data.step, x, y, width, height);
-      }
+    const width = Math.min(surface.canvas.width - data.x, data.clipWidth ?? data.width * data.step);
+    const height = Math.min(surface.canvas.height - data.y, data.clipHeight ?? data.height * data.step);
+    for (const region of claimTile(quality, surface.canvas.width, { x: data.x, y: data.y, width, height }, data.step)) {
+      destination.drawImage(tileCanvas, (region.x - data.x) / data.step, (region.y - data.y) / data.step,
+        region.width / data.step, region.height / data.step, region.x, region.y, region.width, region.height);
     }
     scheduleDraw();
   };

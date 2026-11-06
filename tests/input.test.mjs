@@ -85,6 +85,46 @@ function complexAt(view, x, y) {
 }
 function near(a, b) { assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`); }
 
+function completeRegion(h, region) {
+  h.workers[0].emit({ type: 'tile', id: h.request().id, ...region, step: 1,
+    pixels: new Uint8ClampedArray(region.width * region.height * 4) });
+}
+
+test('completed pixels survive a high-DPI pan, only exposed strips reach workers', () => {
+  const h = harness({ dpr: 2, width: 100, height: 80 });
+  completeRegion(h, { x: 0, y: 0, width: 200, height: 160 });
+  const source = h.canvases.at(-1), previous = h.request();
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 20, clientY: 20 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 23, clientY: 18 }); h.flush();
+  const next = h.request();
+  assert.equal(next.regions.reduce((n, r) => n + r.width * r.height, 0), 200 * 160 - 194 * 156);
+  assert.equal(Number(h.canvas.dataset.reusedPixels), 194 * 156);
+  const copied = h.canvases.at(-1).draws[0];
+  assert.deepEqual(copied, [source, 6, -4]);
+  const draws = h.canvases.at(-1).draws.length;
+  h.workers[1].emit({ type: 'tile', id: previous.id, x: 0, y: 0, width: 10, height: 10, step: 8, pixels: new Uint8ClampedArray(400) });
+  assert.equal(h.canvases.at(-1).draws.length, draws);
+  h.canvas.emit('pointerup', { pointerId: 1 }); h.flush();
+  assert.equal(h.request().id, next.id, 'release must not restart an unchanged raster');
+  h.window.emit('wheel', { clientX: 50, clientY: 40, deltaY: -100, deltaMode: 0 }); h.flush();
+  assert.equal(h.canvas.dataset.reusedPixels, '0', 'zoom invalidates the old sampling grid');
+});
+
+test('unfinished regions are included after a pan; subpixel motion keeps the same job', () => {
+  const h = harness({ dpr: 1.25, width: 80, height: 64 });
+  completeRegion(h, { x: 0, y: 0, width: 40, height: 30 });
+  const initial = h.request();
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 20 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 20.2, clientY: 20.2 }); h.flush();
+  assert.equal(h.request().id, initial.id);
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 21.6, clientY: 20 }); h.flush();
+  assert.equal(Number(h.canvas.dataset.computePixels), 100 * 80 - 40 * 30);
+  const regions = h.request().regions;
+  for (const r of regions) {
+    assert.ok(r.x + r.width <= 2 || r.x >= 42 || r.y >= 30);
+  }
+});
+
 test('actual wheel handler keeps outside-canvas zoom centred', () => {
   const h = harness(), before = h.request().view;
   h.window.emit('wheel', { clientX: -10, clientY: -10, deltaY: -200, deltaMode: 0 }); h.flush();

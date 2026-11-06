@@ -25,27 +25,35 @@ async function render(request: RenderRequest): Promise<void> {
     if (generation !== request.id) throw CANCELLED;
   };
   const { id, view, width, height, cssWidth, cssHeight, workerIndex, workerCount, iterations } = request;
-  const sampler = await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache);
+  const regions = request.regions ?? [{ x: 0, y: 0, width, height }];
+  const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache) : undefined;
   // All passes sample the same world rectangle. Coarse pixels are replaced, not stretched forever.
   for (const step of [8, 4, 2, 1]) {
-    const columns = Math.ceil(width / step), rows = Math.ceil(height / step);
-    const tileSize = 32;
-    const tilesX = Math.ceil(columns / tileSize), tilesY = Math.ceil(rows / tileSize);
-    for (let tile = workerIndex; tile < tilesX * tilesY; tile += workerCount) {
-      await checkpoint();
-      const tx = (tile % tilesX) * tileSize, ty = Math.floor(tile / tilesX) * tileSize;
-      const w = Math.min(tileSize, columns - tx), h = Math.min(tileSize, rows - ty);
-      const pixels = new Uint8ClampedArray(w * h * 4);
-      for (let row = 0; row < h; row++) {
-        for (let col = 0; col < w; col++) {
-          const x = Math.min(width - 0.5, (tx + col + 0.5) * step) / width * cssWidth - cssWidth / 2;
-          const y = Math.min(height - 0.5, (ty + row + 0.5) * step) / height * cssHeight - cssHeight / 2;
-          color(sampler.sample(x, y), pixels, (row * w + col) * 4);
-        }
+    let tileOffset = 0;
+    for (const region of regions) {
+      const columns = Math.ceil(region.width / step), rows = Math.ceil(region.height / step);
+      const tileSize = 32;
+      const tilesX = Math.ceil(columns / tileSize), tilesY = Math.ceil(rows / tileSize);
+      for (let tile = (workerIndex - tileOffset % workerCount + workerCount) % workerCount; tile < tilesX * tilesY; tile += workerCount) {
         await checkpoint();
+        const tx = (tile % tilesX) * tileSize, ty = Math.floor(tile / tilesX) * tileSize;
+        const w = Math.min(tileSize, columns - tx), h = Math.min(tileSize, rows - ty);
+        const pixels = new Uint8ClampedArray(w * h * 4);
+        for (let row = 0; row < h; row++) {
+          for (let col = 0; col < w; col++) {
+            const x = (region.x + Math.min(region.width - 0.5, (tx + col + 0.5) * step)) / width * cssWidth - cssWidth / 2;
+            const y = (region.y + Math.min(region.height - 0.5, (ty + row + 0.5) * step)) / height * cssHeight - cssHeight / 2;
+            color(sampler!.sample(x, y), pixels, (row * w + col) * 4);
+          }
+          await checkpoint();
+        }
+        send({ type: 'tile', id, x: region.x + tx * step, y: region.y + ty * step, width: w, height: h,
+          clipWidth: Math.min(region.width - tx * step, w * step), clipHeight: Math.min(region.height - ty * step, h * step),
+          step, pixels }, [pixels.buffer]);
       }
-      send({ type: 'tile', id, x: tx * step, y: ty * step, width: w, height: h, step, pixels }, [pixels.buffer]);
+      tileOffset += tilesX * tilesY;
     }
-    send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler.stats.fallbacks });
+    await checkpoint();
+    send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0 });
   }
 }

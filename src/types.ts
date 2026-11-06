@@ -1,5 +1,7 @@
 import type { View } from './precision';
 
+export interface RenderRegion { x: number; y: number; width: number; height: number }
+
 export interface RenderRequest {
   id: number;
   view: View;
@@ -10,6 +12,7 @@ export interface RenderRequest {
   workerIndex: number;
   workerCount: number;
   iterations: number;
+  regions?: RenderRegion[];
 }
 
 export interface RenderTile {
@@ -20,6 +23,8 @@ export interface RenderTile {
   width: number;
   height: number;
   step: number;
+  clipWidth?: number;
+  clipHeight?: number;
   pixels: Uint8ClampedArray<ArrayBuffer>;
 }
 
