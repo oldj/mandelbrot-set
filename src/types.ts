@@ -59,6 +59,9 @@ export interface RenderProgress {
   step: number;
   elapsed: number;
   fallbacks: number;
+  /** Samples this worker computed in the pass, and how many reached the budget unresolved. */
+  samples: number;
+  unresolved: number;
 }
 
 /** Worker -> main thread: the orbit a `build` plan produced. */

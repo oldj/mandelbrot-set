@@ -41,12 +41,18 @@ for (const depth of [-45, -100, -400, -800, -899, -1100, -2000]) {
 }
 
 test('non-real, high-iteration seahorse boundary matches high precision', async () => {
+  // Here the exact escape count itself changes by tens to hundreds of
+  // iterations within 1e-3 pixel, so a sample must match the oracle to 1e-3
+  // or lie within the oracle's own variation across a 1e-3 pixel shift.
   for (const depth of [-42, -60]) {
     const view = viewAt(-0.743643887037151, 0.13182590420533, depth);
     const sampler = await createSampler(view, 100, 100, 5000, noop);
     for (let j = 0; j < 50; j++) {
       const x = (j * 73 % 100) - 50, y = (j * 37 % 100) - 50;
-      close(sampler.sample(x, y), oracle(view, x, y, 5000));
+      const expected = oracle(view, x, y, 5000), actual = sampler.sample(x, y);
+      const shifted = [[1e-3, 0], [-1e-3, 0], [0, 1e-3], [0, -1e-3]].map(([dx, dy]) => oracle(view, x + dx, y + dy, 5000));
+      const spread = Math.max(1e-3, ...shifted.map(value => (value < 0) === (expected < 0) ? Math.abs(value - expected) : Infinity));
+      close(actual, expected, spread);
     }
   }
 });
@@ -109,4 +115,72 @@ test('zooming far into an off-centre point rebuilds a reference even when precis
       close(sampler.sample(x, y), oracle(zoomed, x, y, 3000), 1e-6);
     }
   }
+});
+
+import { directRow, INTERIOR } from '../src/fractal.ts';
+
+/** Nucleus of the period-p component near c, by Newton's method in fixed point. */
+function nucleus(re, im, period, bits) {
+  const B = BigInt(bits), one = 1n << B;
+  let cr = toFixed(re, bits), ci = toFixed(im, bits);
+  for (let step = 0; step < 64; step++) {
+    let zr = 0n, zi = 0n, dr = 0n, di = 0n;
+    for (let n = 0; n < period; n++) {
+      const ndr = ((2n * (zr * dr - zi * di)) >> B) + one, ndi = (2n * (zr * di + zi * dr)) >> B;
+      const r2 = (zr * zr) >> B, i2 = (zi * zi) >> B;
+      zi = ((2n * zr * zi) >> B) + ci; zr = r2 - i2 + cr; dr = ndr; di = ndi;
+    }
+    const den = (dr * dr + di * di) >> B;
+    const sr = (((zr * dr + zi * di) >> B) << B) / den, si = (((zi * dr - zr * di) >> B) << B) / den;
+    cr -= sr; ci -= si;
+    if (sr === 0n && si === 0n) break;
+  }
+  return { re: cr, im: ci };
+}
+
+test('three-lane rows are bit-identical to directDouble, including proven interiors', () => {
+  const views = [[-0.6, 0, 3.4 / 256, 1024], [-0.122561166876, 0.744861766619, 2 ** -12, 1024], [-0.7436438870371587, 0.13182590420531197, 2 ** -30, 4096],
+    [-1.25, 0, 2 ** -12, 4096], [-0.75, 0.05, 2 ** -14, 4096], [0.25, 0, 2 ** -16, 4096]];
+  for (const [cx, cy, scale, limit] of views) {
+    const xs = new Float64Array(97), out = new Float64Array(97);
+    for (let j = 0; j < 24; j++) {
+      const ci = cy + (j - 12) * scale * 5;
+      for (let i = 0; i < xs.length; i++) xs[i] = cx + (i - 48) * scale;
+      directRow(xs, ci, xs.length, limit, out);
+      for (let i = 0; i < xs.length; i++) assert.ok(Object.is(out[i], directDouble(xs[i], ci, limit)), `${cx},${cy} row ${j} col ${i}`);
+    }
+  }
+});
+
+test('interior proofs are sound against a four times larger BigInt budget', async () => {
+  const p3 = nucleus(-1.7548776662466927, 0, 3, 1216);
+  const cases = [
+    [ensurePrecision({ re: p3.re, im: p3.im, bits: 1216, logScale: -60 }), 2560],
+    [ensurePrecision({ re: p3.re, im: p3.im, bits: 1216, logScale: -1000 }), 32768],
+    [viewAt(-0.75, 0, -40), 8192], [viewAt(-1.25, 0, -40), 8192],
+  ];
+  for (const [view, limit] of cases) {
+    const sampler = await createSampler(view, 64, 48, limit, noop);
+    let proven = 0;
+    for (let k = 0; k < 16; k++) {
+      const x = (k * 37 % 64) - 32 + 0.31, y = (k * 23 % 48) - 24 + 0.17;
+      const before = sampler.stats.unresolved;
+      const value = sampler.sample(x, y);
+      if (value === INTERIOR && sampler.stats.unresolved === before) {
+        proven++;
+        assert.equal(oracle(view, x, y, limit * 4), INTERIOR, `proof at ${x},${y}`);
+      }
+    }
+    assert.ok(proven > 0, 'some interior samples are proved');
+  }
+});
+
+test('deep minibrot interiors are proved instead of iterating the whole budget', async () => {
+  const p3 = nucleus(-1.7548776662466927, 0, 3, 1216);
+  const view = ensurePrecision({ re: p3.re, im: p3.im, bits: 1216, logScale: -1000 });
+  const sampler = await createSampler(view, 64, 48, 32768, noop);
+  const started = performance.now();
+  for (let k = 0; k < 24; k++) assert.equal(sampler.sample((k % 6) * 10 - 25, Math.floor(k / 6) * 10 - 15), INTERIOR);
+  assert.equal(sampler.stats.unresolved, 0);
+  assert.ok(performance.now() - started < 1000, 'running 32768 extended iterations per sample would take far longer');
 });

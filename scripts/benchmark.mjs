@@ -5,6 +5,7 @@ const source = resolve(process.argv[2] || 'src');
 const { createSampler, iterationBudget, color } = await import(pathToFileURL(`${source}/fractal.ts`));
 const { initialView, ensurePrecision, toFixed } = await import(pathToFileURL(`${source}/precision.ts`));
 const width = 160, height = 100, cssWidth = 1280, cssHeight = 800;
+const xs = new Float64Array(width), values = new Float64Array(width);
 const decimal = (text, bits) => {
   const [whole, fraction] = text.split('.');
   return BigInt(whole + fraction) * (1n << BigInt(bits)) / 10n ** BigInt(fraction.length);
@@ -33,10 +34,16 @@ for (const [scene, view] of scenes) {
   for (let pass = 0; pass < 4; pass++) {
     const begin = performance.now();
     checksum = 0;
-    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-      color(sampler.sample((x + 0.5) / width * cssWidth - cssWidth / 2,
-        (y + 0.5) / height * cssHeight - cssHeight / 2), pixel, 0);
-      checksum += pixel[0] + pixel[1] + pixel[2];
+    for (let y = 0; y < height; y++) {
+      // Use the row path where the sampler has one, as the workers do.
+      for (let x = 0; x < width; x++) xs[x] = (x + 0.5) / width * cssWidth - cssWidth / 2;
+      const cy = (y + 0.5) / height * cssHeight - cssHeight / 2;
+      if (sampler.row) sampler.row(xs, width, cy, values);
+      else for (let x = 0; x < width; x++) values[x] = sampler.sample(xs[x], cy);
+      for (let x = 0; x < width; x++) {
+        color(values[x], pixel, 0);
+        checksum += pixel[0] + pixel[1] + pixel[2];
+      }
     }
     if (pass > 0) times.push(performance.now() - begin);
   }

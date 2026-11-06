@@ -166,3 +166,24 @@ test('a newer request for the same key continues the build; a different key canc
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.deepEqual(references, [1]);
 });
+
+test('reused coarse samples leave a deep render identical to sampling every pixel', async t => {
+  const worker = startWorker(t);
+  const request = deepRequest(1, { width: 37, height: 29, cssWidth: 37, cssHeight: 29 });
+  const tiles = await collect(worker, request);
+  const { createSampler } = await import('../src/fractal.ts');
+  const sampler = await createSampler(request.view, 37, 29, request.iterations, async () => {});
+  for (const tile of tiles.filter(tile => tile.step === 1)) {
+    for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
+      const expected = new Uint8ClampedArray(4);
+      color(sampler.sample(tile.x + col + 0.5 - 18.5, tile.y + row + 0.5 - 14.5), expected, 0);
+      const offset = (row * tile.width + col) * 4;
+      assert.deepEqual(tile.pixels.slice(offset, offset + 4), expected);
+    }
+  }
+  // Every pass covers every pixel, and the coarse passes sample block corners.
+  for (const step of [8, 4, 2, 1]) {
+    const covered = tiles.filter(tile => tile.step === step).reduce((n, tile) => n + tile.clipWidth * tile.clipHeight, 0);
+    assert.equal(covered, 37 * 29);
+  }
+});

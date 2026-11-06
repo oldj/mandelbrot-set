@@ -365,3 +365,24 @@ test('reset is hidden at the default view and appears once the view changes', ()
   h.flushFrames();
   assert.equal(reset.hidden, false, 'panning alone also offers reset');
 });
+
+test('a coarse pass that runs out of iterations re-renders with a raised budget', () => {
+  const h = harness({ cores: 3 });
+  const first = h.request();
+  const active = h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type);
+  for (const worker of active) {
+    worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 500 });
+  }
+  const raised = h.request();
+  assert.equal(raised.id, first.id + 1);
+  assert.equal(raised.iterations, first.iterations * 4);
+  assert.equal(h.canvas.dataset.iterations, String(first.iterations * 4));
+  // Resolved now: completing the render does not raise again.
+  for (const worker of h.workers.filter(worker => worker.messages.at(-1).id === raised.id && !worker.messages.at(-1).type)) {
+    worker.emit({ type: 'pass', id: raised.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 0 });
+  }
+  assert.equal(h.request().id, raised.id);
+  // Home forgets the learned budget.
+  h.window.emit('keydown', { key: 'Home' });
+  assert.equal(h.request().iterations, first.iterations);
+});

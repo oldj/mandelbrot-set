@@ -1,6 +1,7 @@
 import { initialView, isInitialView, transformView, viewOffset } from './precision';
 import type { Point, View } from './precision';
-import { iterationBudget } from './fractal';
+import { adaptBudget, chooseBudget, rememberUse } from './budget';
+import type { BudgetMemory } from './budget';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import { missingRegions, panRaster, shiftQuality } from './raster-cache';
@@ -39,6 +40,9 @@ let lastRender = -Infinity;
 let renderTimer: ReturnType<typeof setTimeout>;
 let coarseReady = false;
 const passCounts = new Map<number, number>();
+/** Learned iteration budget, and the coarse-pass tally that adapts it. */
+let budgetMemory: BudgetMemory | undefined;
+let coarseSamples = 0, coarseUnresolved = 0;
 const workers: Worker[] = [];
 const workerLimit = workerCapacity(navigator.hardwareConcurrency);
 let activeWorkerCount = 1;
@@ -69,7 +73,7 @@ function referencePlan(shared: SharedOrbit, workerIndex: number): ReferencePlan 
   return workerIndex === 0 ? { ...plan, build: true } : plan;
 }
 
-interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number }
+interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number; iterations: number }
 let surface: Surface | undefined;
 let quality = new Uint8Array();
 let stage: TileStage | undefined;
@@ -169,7 +173,10 @@ coordinateObserver.observe(imaginaryLabel);
 
 function startRender(): void {
   clearTimeout(renderTimer);
-  const pan = surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight
+  const iterations = chooseBudget(budgetMemory, view.logScale);
+  budgetMemory = rememberUse(budgetMemory, view.logScale);
+  // Reused pixels must come from the same budget: a larger one may resolve black pixels.
+  const pan = surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight && surface.iterations === iterations
     && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
     ? panRaster(surface.view, view, canvas.width, canvas.height, cssWidth, cssHeight) : undefined;
   // A release or subpixel movement need not cancel useful work already in flight.
@@ -200,16 +207,16 @@ function startRender(): void {
   }
   const regions = pan ? missingRegions(quality, image.width, image.height)
     : [{ x: 0, y: 0, width: image.width, height: image.height }];
-  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight };
+  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations };
   generation++;
   lastRender = performance.now();
   coarseReady = false;
   passCounts.clear();
+  coarseSamples = coarseUnresolved = 0;
   canvas.dataset.rendered = 'false';
   canvas.setAttribute('aria-busy', 'true');
   canvas.dataset.precisionBits = String(view.bits);
   canvas.dataset.logScale = String(view.logScale);
-  const iterations = iterationBudget(view.logScale);
   canvas.dataset.iterations = String(iterations);
   const renderPixels = regions.reduce((sum, region) => sum + region.width * region.height, 0);
   canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
@@ -266,8 +273,14 @@ function createWorker(): void {
     if (data.type === 'pass') {
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
+      if (data.step === 8) { coarseSamples += data.samples; coarseUnresolved += data.unresolved; }
       if (count === activeWorkerCount) {
-        if (data.step === 8) coarseReady = true;
+        if (data.step === 8) {
+          coarseReady = true;
+          const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
+          budgetMemory = adapted.memory;
+          if (adapted.raise) { startRender(); return; }
+        }
         if (data.step === 1) {
           flushTiles();
           canvas.dataset.rendered = 'true';
@@ -310,7 +323,8 @@ canvas.addEventListener('pointerdown', event => {
   if (!view || (event.pointerType === 'mouse' && event.button !== 0)) return;
   event.preventDefault();
   canvas.focus({ preventScroll: true });
-  canvas.setPointerCapture(event.pointerId);
+  // Capture can fail if the pointer is already gone (released before this handler ran).
+  try { canvas.setPointerCapture(event.pointerId); } catch { return; }
   pointers.set(event.pointerId, localPoint(event.clientX, event.clientY));
   canvas.classList.add('dragging');
 });
@@ -342,6 +356,7 @@ function resetView(): void {
   pointers.clear();
   canvas.classList.remove('dragging');
   view = initialView(cssWidth, cssHeight);
+  budgetMemory = undefined;
   startRender();
 }
 

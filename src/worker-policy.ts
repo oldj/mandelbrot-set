@@ -4,12 +4,23 @@ export function workerCapacity(hardwareConcurrency: number | undefined): number 
   return Math.max(1, Math.min(8, cores - 1));
 }
 
+/** All workers' reference tables together should stay around this size. */
+const REFERENCE_MEMORY = 192 * 1024 * 1024;
+
+/**
+ * Per worker and orbit step: native BLA tables in typed arrays plus the
+ * orbit (~160 B); below 2^-800 the extended-exponent object tables (~768 B).
+ */
+export function referenceBytesPerIteration(logScale: number): number {
+  return logScale <= -800 ? 768 : 160;
+}
+
 export function renderWorkerCount(capacity: number, pixels: number, logScale: number, iterations: number): number {
   const deep = logScale <= -38;
   const workload = Math.ceil(pixels / (deep ? 8192 : 65536));
-  // Each deep worker owns an orbit and BLA tree. This is a conservative planning
-  // estimate (not a hard memory bound), so very long references don't multiply
-  // unchecked just because a device advertises many cores.
-  const referenceLimit = deep ? Math.floor(128 * 1024 * 1024 / (iterations * 768)) : capacity;
+  // Each deep worker owns a copy of the reference tables. This is a conservative
+  // planning estimate (not a hard memory bound), so very long references don't
+  // multiply unchecked just because a device advertises many cores.
+  const referenceLimit = deep ? Math.floor(REFERENCE_MEMORY / (iterations * referenceBytesPerIteration(logScale))) : capacity;
   return Math.max(1, Math.min(capacity, workload, referenceLimit));
 }

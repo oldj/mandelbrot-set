@@ -1,4 +1,4 @@
-import { color, computeOrbit, createSampler, referenceFromOrbit } from './fractal.ts';
+import { color, computeOrbit, createSampler, EXTENDED_LOG_SCALE, referenceFromOrbit } from './fractal.ts';
 import type { ReferenceCache, ReferenceEntry } from './fractal';
 import type { OrbitData, ReferenceSpec } from './reference';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
@@ -8,6 +8,9 @@ const referenceCache: ReferenceCache = {};
 const CANCELLED = Symbol('cancelled');
 /** Batch finished tiles; each main-thread message and canvas upload has a fixed cost. */
 const FLUSH_MS = 16;
+/** Spatial tile size in physical pixels; a multiple of the coarsest step (8). */
+const TILE_SIZE = 32;
+interface OwnTile { x: number; y: number; width: number; height: number; previous?: Uint32Array; previousColumns: number }
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 // Shared reference state. Work on a reference is tied to its key, not to one
@@ -67,7 +70,8 @@ function sharedReference(plan: ReferencePlan): Promise<ReferenceEntry> {
   if (shared?.key === plan.key) return shared.promise;
   const promise = (async () => {
     const data = await receiveOrbit(plan);
-    const reference = await referenceFromOrbit(data, plan.spec.logRadius, referenceCheckpoint(plan.key));
+    const reference = await referenceFromOrbit(data, plan.spec.logRadius, referenceCheckpoint(plan.key),
+      plan.spec.view.logScale <= EXTENDED_LOG_SCALE + 100);
     return { ...plan.spec, reference };
   })();
   const current = { key: plan.key, promise };
@@ -97,36 +101,62 @@ async function render(request: RenderRequest): Promise<void> {
   const { reference } = request;
   const source = reference && (() => sharedReference(reference));
   const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
-  // All passes sample the same world rectangle. Coarse pixels are replaced, not stretched forever.
+  // Each worker owns fixed spatial tiles through every pass. A block is sampled
+  // at its top-left pixel centre, so every coarse sample is exactly a final
+  // pixel: finer passes copy those (a quarter of their samples) instead of
+  // recomputing them, and the finished image is identical to sampling every
+  // pixel once (about 25% less work than independent passes).
+  const tiles: OwnTile[] = [];
+  let tileOffset = 0;
+  for (const region of regions) {
+    const tilesX = Math.ceil(region.width / TILE_SIZE), tilesY = Math.ceil(region.height / TILE_SIZE);
+    for (let tile = (workerIndex - tileOffset % workerCount + workerCount) % workerCount; tile < tilesX * tilesY; tile += workerCount) {
+      const tx = (tile % tilesX) * TILE_SIZE, ty = Math.floor(tile / tilesX) * TILE_SIZE;
+      tiles.push({ x: region.x + tx, y: region.y + ty, width: Math.min(TILE_SIZE, region.width - tx),
+        height: Math.min(TILE_SIZE, region.height - ty), previousColumns: 0 });
+    }
+    tileOffset += tilesX * tilesY;
+  }
+  const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
+  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), targets = new Int32Array(TILE_SIZE);
   for (const step of [8, 4, 2, 1]) {
-    let tileOffset = 0;
-    for (const region of regions) {
-      const columns = Math.ceil(region.width / step), rows = Math.ceil(region.height / step);
-      const tileSize = 32;
-      const tilesX = Math.ceil(columns / tileSize), tilesY = Math.ceil(rows / tileSize);
-      for (let tile = (workerIndex - tileOffset % workerCount + workerCount) % workerCount; tile < tilesX * tilesY; tile += workerCount) {
-        await checkpoint();
-        const tx = (tile % tilesX) * tileSize, ty = Math.floor(tile / tilesX) * tileSize;
-        const w = Math.min(tileSize, columns - tx), h = Math.min(tileSize, rows - ty);
-        const pixels = new Uint8ClampedArray(w * h * 4);
-        for (let row = 0; row < h; row++) {
-          for (let col = 0; col < w; col++) {
-            const x = (region.x + Math.min(region.width - 0.5, (tx + col + 0.5) * step)) / width * cssWidth - cssWidth / 2;
-            const y = (region.y + Math.min(region.height - 0.5, (ty + row + 0.5) * step)) / height * cssHeight - cssHeight / 2;
-            color(sampler!.sample(x, y), pixels, (row * w + col) * 4);
-          }
-          await checkpoint();
+    let samples = 0;
+    const unresolvedBefore = sampler?.stats.unresolved ?? 0;
+    for (const tile of tiles) {
+      await checkpoint();
+      const columns = Math.ceil(tile.width / step), rows = Math.ceil(tile.height / step);
+      const pixels = new Uint8ClampedArray(columns * rows * 4), words = new Uint32Array(pixels.buffer);
+      const previous = tile.previous, previousColumns = tile.previousColumns;
+      for (let row = 0; row < rows; row++) {
+        const y = toCss(tile.y + row * step, height, cssHeight);
+        // Even rows and columns coincide with the previous (twice as coarse) pass.
+        const inherit = previous !== undefined && (row & 1) === 0;
+        let count = 0;
+        for (let col = inherit ? 1 : 0; col < columns; col += inherit ? 2 : 1) {
+          targets[count] = col;
+          xs[count++] = toCss(tile.x + col * step, width, cssWidth);
         }
-        batch.push({ x: region.x + tx * step, y: region.y + ty * step, width: w, height: h,
-          clipWidth: Math.min(region.width - tx * step, w * step), clipHeight: Math.min(region.height - ty * step, h * step),
-          step, pixels });
-        transfer.push(pixels.buffer);
-        if (performance.now() - lastFlush >= FLUSH_MS) flush();
+        if (inherit) {
+          for (let col = 0; col < columns; col += 2) words[row * columns + col] = previous[(row >> 1) * previousColumns + (col >> 1)];
+        }
+        if (count) {
+          if (sampler!.row) sampler!.row(xs, count, y, values);
+          else for (let k = 0; k < count; k++) values[k] = sampler!.sample(xs[k], y);
+          for (let k = 0; k < count; k++) color(values[k], pixels, (row * columns + targets[k]) * 4);
+        }
+        samples += count;
+        await checkpoint();
       }
-      tileOffset += tilesX * tilesY;
+      // The pixel buffer is transferred below; keep a copy for the next pass.
+      tile.previous = step > 1 ? words.slice() : undefined;
+      tile.previousColumns = columns;
+      batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height, step, pixels });
+      transfer.push(pixels.buffer);
+      if (performance.now() - lastFlush >= FLUSH_MS) flush();
     }
     await checkpoint();
     flush();
-    send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0 });
+    send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
+      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore });
   }
 }
