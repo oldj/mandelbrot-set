@@ -1,4 +1,3 @@
-import './style.css';
 import { initialView, transformView, viewOffset } from './precision';
 import type { Point, View } from './precision';
 import { iterationBudget } from './fractal';
