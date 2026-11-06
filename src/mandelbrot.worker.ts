@@ -1,14 +1,15 @@
 import { color, createSampler } from './fractal.ts';
 import type { ReferenceCache } from './fractal';
-import type { RenderMessage, RenderRequest } from './types';
+import type { RenderCommand, RenderMessage, RenderRequest } from './types';
 
 let generation = 0;
 const referenceCache: ReferenceCache = {};
 const CANCELLED = Symbol('cancelled');
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
-self.onmessage = ({ data }: MessageEvent<RenderRequest>) => {
+self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
   generation = data.id;
+  if ('type' in data) return;
   void render(data).catch(error => {
     if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
   });

@@ -10,7 +10,7 @@ import { formatCoordinate } from '../src/view-info.ts';
 const bundle = await build({ entryPoints: ['src/main.ts'], bundle: true, write: false, format: 'iife',
   loader: { '.css': 'empty' }, define: { 'import.meta.url': '"http://localhost/src/main.ts"' } });
 
-function harness({ dpr = 1, width = 800, height = 600, clipboardWrite = async () => {} } = {}) {
+function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {} } = {}) {
   const canvases = [], workers = [], timers = new Map(), frames = new Map(), mediaQueries = [];
   const clipboardWrites = [];
   const resizeObservers = [];
@@ -59,7 +59,7 @@ function harness({ dpr = 1, width = 800, height = 600, clipboardWrite = async ()
   window.devicePixelRatio = dpr;
   const globals = {
     document: { querySelector: selector => elements.get(selector), createElement: () => new Canvas() },
-    window, navigator: { hardwareConcurrency: 3, clipboard: clipboardWrite ? {
+    window, navigator: { hardwareConcurrency: cores, clipboard: clipboardWrite ? {
       writeText: async text => { clipboardWrites.push(text); await clipboardWrite(text); },
     } : undefined }, Worker: FakeWorker, URL,
     getComputedStyle: () => ({ font: '', fontSize: '11px', fontFamily: 'monospace', fontWeight: '400', letterSpacing: '0.11px' }),
@@ -90,6 +90,23 @@ function completeRegion(h, region) {
     pixels: new Uint8ClampedArray(region.width * region.height * 4) });
 }
 
+test('large renders expand the pool; narrow pans cancel surplus workers and finish with the active count', () => {
+  const h = harness({ cores: 16 });
+  assert.equal(h.workers.length, 8);
+  assert.equal(h.request().workerCount, 8);
+  completeRegion(h, { x: 0, y: 0, width: 800, height: 600 });
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 400, clientY: 300 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 403, clientY: 300 }); h.flush();
+  const current = h.request();
+  assert.equal(current.workerCount, 1);
+  for (const worker of h.workers.slice(1)) assert.deepEqual(worker.messages.at(-1), { type: 'cancel', id: current.id });
+  h.workers[0].emit({ type: 'pass', id: current.id, step: 1, elapsed: 1, fallbacks: 0 });
+  assert.equal(h.canvas.dataset.rendered, 'true');
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 }); h.flush();
+  assert.equal(h.request().workerCount, 8);
+  assert.equal(h.workers.length, 8, 'existing workers are reused');
+});
+
 test('completed pixels survive a high-DPI pan, only exposed strips reach workers', () => {
   const h = harness({ dpr: 2, width: 100, height: 80 });
   completeRegion(h, { x: 0, y: 0, width: 200, height: 160 });
@@ -102,7 +119,7 @@ test('completed pixels survive a high-DPI pan, only exposed strips reach workers
   const copied = h.canvases.at(-1).draws[0];
   assert.deepEqual(copied, [source, 6, -4]);
   const draws = h.canvases.at(-1).draws.length;
-  h.workers[1].emit({ type: 'tile', id: previous.id, x: 0, y: 0, width: 10, height: 10, step: 8, pixels: new Uint8ClampedArray(400) });
+  h.workers[0].emit({ type: 'tile', id: previous.id, x: 0, y: 0, width: 10, height: 10, step: 8, pixels: new Uint8ClampedArray(400) });
   assert.equal(h.canvases.at(-1).draws.length, draws);
   h.canvas.emit('pointerup', { pointerId: 1 }); h.flush();
   assert.equal(h.request().id, next.id, 'release must not restart an unchanged raster');

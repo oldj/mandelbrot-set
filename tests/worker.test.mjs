@@ -61,9 +61,11 @@ test('a new request cancels a costly reference job instead of waiting for its fr
   const messages = [];
   worker.on('message', message => messages.push(message));
   worker.postMessage(request);
-  const tiles = await collect(worker, { ...request, id: 2, view: initialView(32, 24), iterations: 1024 });
+  worker.postMessage({ type: 'cancel', id: 2 });
+  const tiles = await collect(worker, { ...request, id: 3, view: initialView(32, 24), iterations: 1024 });
   assert.ok(tiles.length > 0);
-  assert.ok(messages.filter(message => message.type === 'tile').every(message => message.id === 2));
+  assert.ok(messages.filter(message => message.type === 'tile').every(message => message.id === 3));
+  assert.ok(!messages.some(message => message.type === 'error'));
 });
 
 test('partial worker passes cover only exposed pixels and reconstruct a full fresh render', async t => {

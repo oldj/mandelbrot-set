@@ -2,6 +2,8 @@ import type { View } from './precision';
 
 export interface RenderRegion { x: number; y: number; width: number; height: number }
 
+export type RenderCommand = RenderRequest | { type: 'cancel'; id: number };
+
 export interface RenderRequest {
   id: number;
   view: View;

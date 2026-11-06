@@ -5,6 +5,7 @@ import { iterationBudget } from './fractal';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import { claimTile, missingRegions, panRaster, shiftQuality } from './raster-cache';
+import { renderWorkerCount, workerCapacity } from './worker-policy';
 import type { RenderMessage, RenderRequest } from './types';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
@@ -37,7 +38,8 @@ let renderTimer: ReturnType<typeof setTimeout>;
 let coarseReady = false;
 const passCounts = new Map<number, number>();
 const workers: Worker[] = [];
-const workerCount = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+const workerLimit = workerCapacity(navigator.hardwareConcurrency);
+let activeWorkerCount = 1;
 
 interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number }
 let surface: Surface | undefined;
@@ -148,9 +150,16 @@ function startRender(): void {
   const renderPixels = regions.reduce((sum, region) => sum + region.width * region.height, 0);
   canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
   canvas.dataset.computePixels = String(renderPixels);
+  activeWorkerCount = renderWorkerCount(workerLimit, renderPixels, view.logScale, iterations);
+  canvas.dataset.workers = String(activeWorkerCount);
+  while (workers.length < activeWorkerCount) createWorker();
   workers.forEach((worker, workerIndex) => {
+    if (workerIndex >= activeWorkerCount) {
+      worker.postMessage({ type: 'cancel', id: generation });
+      return;
+    }
     worker.postMessage({ id: generation, view: surface!.view, width: image.width, height: image.height,
-      cssWidth, cssHeight, workerIndex, workerCount, iterations, regions } satisfies RenderRequest);
+      cssWidth, cssHeight, workerIndex, workerCount: activeWorkerCount, iterations, regions } satisfies RenderRequest);
   });
   scheduleDraw();
 }
@@ -163,7 +172,7 @@ function changed(): void {
   else renderTimer = setTimeout(startRender, 120);
 }
 
-for (let i = 0; i < workerCount; i++) {
+function createWorker(): void {
   const worker = new Worker(new URL('./mandelbrot.worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }: MessageEvent<RenderMessage>) => {
     if (data.id !== generation || !surface) return;
@@ -177,7 +186,7 @@ for (let i = 0; i < workerCount; i++) {
     if (data.type === 'pass') {
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
-      if (count === workerCount) {
+      if (count === activeWorkerCount) {
         if (data.step === 8) coarseReady = true;
         if (data.step === 1) {
           canvas.dataset.rendered = 'true';

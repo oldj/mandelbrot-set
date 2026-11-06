@@ -28,7 +28,7 @@ test('known interior/exterior points and conjugate symmetry', () => {
   }
 });
 
-for (const depth of [-45, -100, -400, -1100, -2000]) {
+for (const depth of [-45, -100, -400, -800, -899, -1100, -2000]) {
   test(`perturbation at 2^${depth} agrees with BigInt and resolves adjacent pixels`, async () => {
     const view = viewAt(-2, 0, depth), limit = 2048;
     const sampler = await createSampler(view, 32, 24, limit, noop);
@@ -82,4 +82,11 @@ test('reference generation cooperates with cancellation', async () => {
 test('iteration budget increases with depth', () => {
   assert.ok(iterationBudget(-1000) > iterationBudget(-100));
   assert.ok(iterationBudget(-100) > iterationBudget(-10));
+});
+
+test('exact periodicity shortcut agrees with BigInt around a period-three bulb', () => {
+  for (const dx of [-0.03, -0.01, 0, 0.01, 0.03]) for (const dy of [-0.03, 0, 0.03]) {
+    const re = -0.122561166876 + dx, im = 0.744861766619 + dy;
+    close(directDouble(re, im, 8192), directFixed(toFixed(re, 256), toFixed(im, 256), 256, 8192), 1e-4);
+  }
 });
