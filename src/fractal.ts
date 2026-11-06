@@ -436,6 +436,92 @@ const TRAP_BAND = 2 ** -8;
 const PROOF_START = 128;
 /** Generous bound on the relative rounding of one double operation chain. */
 const ROUNDING = 2 ** -50;
+/**
+ * attractingCycle is tried on looser returns than the in-loop proof: within
+ * 2^-2 of |base| (squared terms), with |z|² within 2^-2 of |base|². An attempt
+ * needs 3P unspent steps (proof work stays within ~the steps executed), takes
+ * at most NEWTON_PASSES laps, and the k-th failed one waits 4P 2^k before the
+ * next: escaping orbits keep passing near repelling cycles.
+ */
+const NEWTON_RETURN_SQUARED = 2 ** -2, NEWTON_BAND = 2 ** -2, NEWTON_COST = 3, NEWTON_PASSES = 10;
+
+/**
+ * Interior proof by an attracting cycle. The orbit of an interior point can
+ * take a very long time to settle near its cycle (each lap of a period-844
+ * cycle may bring it only ~12% closer), so waiting for a close return, as
+ * perturbNative's own proof does, costs tens of thousands of iterations per
+ * pixel. Instead, from a rough return after P steps, Newton's method on
+ * f^P(w) = w finds the cycle point directly, and the disk check below proves,
+ * with rounding bounds, that f^P maps a disk around it into itself. Then f^P
+ * has an attracting fixed point there (Schwarz lemma), and an attracting cycle
+ * of z^2 + c always attracts the critical point 0 (Fatou), so the orbit of 0
+ * stays bounded: c is interior, whether or not the orbit has come close yet.
+ *
+ * Runs from the orbit state (m0, δ = s) without changing it; each pass is P
+ * single steps. Returns the steps spent, negated when the proof succeeded.
+ */
+function attractingCycle(reference: Reference, m0: number, sr: number, si: number, dcRe: number, dcIm: number,
+  period: number, dcError: number): number {
+  const real = reference.real, imag = reference.imag, end = real.length - 1;
+  let spent = 0, radius0 = 0, previousStep = Infinity;
+  for (let pass = 0; pass < NEWTON_PASSES; pass++) {
+    // One lap from w = Z_m0 + s: f^P(w), its derivative D = (f^P)'(w), and,
+    // after the first pass, bounds ra..rd on the images of D(w, r) for four
+    // radii, as in perturbNative. The reference values' own rounding only
+    // scales δ there (covered by the 4|Z||δ| term); it enters the totals at
+    // the start, the end and on rebasing, which add it explicitly.
+    const check = pass > 0;
+    const startRe = real[m0] + sr, startIm = imag[m0] + si;
+    const startError = ROUNDING * (Math.sqrt(real[m0] * real[m0] + imag[m0] * imag[m0]) + Math.sqrt(sr * sr + si * si));
+    let ra = radius0, rb = radius0 * 16, rc = radius0 * 256, rd = radius0 * 4096;
+    let m = m0, dr = sr, di = si, Dr = 1, Di = 0;
+    for (let k = 0; k < period; k++) {
+      const zr = real[m], zi = imag[m], tr = zr + dr, ti = zi + di;
+      if (check) {
+        const ref = Math.sqrt(zr * zr + zi * zi), delta = Math.sqrt(dr * dr + di * di);
+        const twice = 2 * Math.sqrt(tr * tr + ti * ti), rounding = ROUNDING * (4 * ref * delta + delta * delta) + dcError;
+        ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
+        rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
+      }
+      const nextD = 2 * (tr * Dr - ti * Di);
+      Di = 2 * (tr * Di + ti * Dr); Dr = nextD;
+      const nextRe = 2 * (zr * dr - zi * di) + dr * dr - di * di + dcRe;
+      di = 2 * (zr * di + zi * dr + dr * di) + dcIm; dr = nextRe;
+      m++;
+      const er = real[m] + dr, ei = imag[m] + di, squared = er * er + ei * ei;
+      if (!(squared <= 256)) return spent + k;
+      if (squared < dr * dr + di * di || m === end) {
+        if (check) {
+          const error = ROUNDING * (Math.sqrt(real[m] * real[m] + imag[m] * imag[m]) + Math.sqrt(dr * dr + di * di));
+          ra += error; rb += error; rc += error; rd += error;
+        }
+        dr = er; di = ei; m = 0;
+      }
+    }
+    spent += period;
+    const gr = real[m] + dr - startRe, gi = imag[m] + di - startIm, lambda = Math.sqrt(Dr * Dr + Di * Di);
+    if (check) {
+      const error = ROUNDING * (Math.sqrt(real[m] * real[m] + imag[m] * imag[m]) + Math.sqrt(dr * dr + di * di));
+      const distance = Math.sqrt(gr * gr + gi * gi) + startError + error;
+      if (distance + ra < radius0 || distance + rb < radius0 * 16 || distance + rc < radius0 * 256
+        || distance + rd < radius0 * 4096) return -spent;
+    }
+    // Newton for g(w) = f^P(w) - w: w -= g / (D - 1). Stop on a nearly
+    // converged repelling cycle (wrong period, or c outside; within 2^-8 the
+    // derivative is that of the cycle) or once steps stop shrinking.
+    const ar = Dr - 1, ai = Di, den = ar * ar + ai * ai;
+    const stepRe = (gr * ar + gi * ai) / den, stepIm = (gi * ar - gr * ai) / den;
+    const step = Math.sqrt(stepRe * stepRe + stepIm * stepIm), size = Math.sqrt(startRe * startRe + startIm * startIm);
+    if (!(lambda < 1) && !(step > 2 ** -8 * size)) break;
+    if (!(step < previousStep) && pass > 2) break;
+    sr -= stepRe; si -= stepIm;
+    previousStep = step;
+    // Newton converges quadratically: the fixed point lies well within one
+    // step of the new w, so the disks start at 4x the step, scaled for |λ|.
+    radius0 = lambda < 1 ? 4 * (step + startError + Number.MIN_VALUE) / (1 - lambda) : 0;
+  }
+  return spent;
+}
 
 /**
  * Perturbation with BLA skipping and an interior proof.
@@ -462,7 +548,7 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
   let baseRe = 0, baseIm = 0, baseSquared = Infinity, far = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
   // Proof state; ra..rd bound the disk images for four starting radii (radius0 x 1, 2^8, 2^16, 2^24).
   let verify = 0, spent = 0, steps = 0, startRe = 0, startIm = 0, startError = 0, radius0 = 0;
-  let ra = 0, rb = 0, rc = 0, rd = 0;
+  let ra = 0, rb = 0, rc = 0, rd = 0, newtonRetry = 0, newtonFails = 0;
   const dcError = ROUNDING * Math.hypot(dcRe, dcIm);
   while (n < limit) {
     steps++;
@@ -525,9 +611,10 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
       } else if (rebase) { ra += error; rb += error; rc += error; rd += error; }
     } else if (!skipped && squared >= 1e-280 && (squared <= far || n >= reset)) {
       // Returns and collapses happen near z = 0, where BLA cannot apply: track
-      // single steps only. A return within 2^-10 of the base needs |z|² within
-      // ~2^-9 of |base|², so most steps stop at the `far` test above.
-      // A proof starts on a close return, or on a second consecutive collapse
+      // single steps only. Any return attractingCycle tries needs |z|² within
+      // 2^-2 of |base|², so most steps stop at the `far` test above. A rough
+      // return first tries attractingCycle; the in-loop proof starts on a
+      // close return (within 2^-10), or on a second consecutive collapse
       // of |z| far below the base (super-attracting cycles shrink faster than
       // any fixed gap; two collapses in a row measure a true period). Proof
       // steps run without BLA, so they are capped by the steps executed.
@@ -535,6 +622,16 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
       const near = relative < TRAP_BAND * baseSquared && relative > -TRAP_BAND * baseSquared;
       const collapse = !near && squared < TRAP_RETURN_SQUARED * baseSquared;
       let start = false, distanceSquared = 0;
+      const period = n - baseN;
+      if (relative < NEWTON_BAND * baseSquared && relative > -NEWTON_BAND * baseSquared && n >= newtonRetry
+        && n >= PROOF_START && period > 2 && spent + NEWTON_COST * period <= steps) {
+        const ex = totalRe - baseRe, ey = totalIm - baseIm;
+        if (ex * ex + ey * ey < NEWTON_RETURN_SQUARED * baseSquared) {
+          const used = attractingCycle(reference, m, dr, di, dcRe, dcIm, period, dcError);
+          if (used < 0) return INTERIOR;
+          spent += used; newtonRetry = n + 4 * period * 2 ** ++newtonFails;
+        }
+      }
       if ((near || (collapse && collapsedBase)) && n >= retry && n >= PROOF_START && n - baseN > 2 && spent + n - baseN <= steps) {
         const ex = totalRe - baseRe, ey = totalIm - baseIm;
         distanceSquared = ex * ex + ey * ey;
@@ -551,8 +648,8 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
         if (n >= reset) reset *= 2;
         collapsedBase = collapse;
         baseRe = totalRe; baseIm = totalIm; baseSquared = squared; baseN = n;
-        // Strictly beyond the band even after rounding: relative > 2^-8 |base|² there.
-        far = squared * (1 + 2 * TRAP_BAND);
+        // Strictly beyond both bands even after rounding.
+        far = squared * (1 + 2 * NEWTON_BAND);
       }
     }
     if (rebase || m === end) {

@@ -231,3 +231,27 @@ test('distance estimates agree with a high-precision derivative at every depth, 
     if (view.logScale < -100) assert.ok(sampler.stats.skipped > 0);
   }
 });
+
+test('slowly settling interiors are proved by their attracting cycle, soundly, near the component boundary', async () => {
+  // A period-844 component near a period-211 minibrot at 4.17e13: each lap
+  // brings orbits only ~12% closer to the cycle, so close returns take
+  // 35 000-140 000 iterations. Newton on f^P finds the cycle point first.
+  const { parseViewHash } = await import('../src/url-state.ts');
+  const { initialView } = await import('../src/precision.ts');
+  const view = parseViewHash('#re=-0.73088326955313741591&im=0.24781738096196057252&zoom=4.171992716e13', initialView(1280, 800).logScale);
+  const limit = 20000, sampler = await createSampler(view, 1280, 800, limit, noop);
+  for (const [x, y] of [[-360, -216], [-552, -312], [-632, -392], [-88, -40]]) {
+    assert.equal(sampler.sample(x, y), INTERIOR, `${x},${y}`);
+  }
+  assert.equal(sampler.stats.unresolved, 0, 'proved well within a budget their orbits need many times over');
+  // Across the component and its boundary, every proved sample stays bounded for four times the budget.
+  let proven = 0, escaped = 0;
+  for (let k = 0; k < 40; k++) {
+    const x = (k * 37 % 40) * 32 - 620 + 0.29, y = (k * 23 % 25) * 32 - 390 + 0.41;
+    const before = sampler.stats.unresolved, value = sampler.sample(x, y);
+    if (value !== INTERIOR) { escaped++; continue; }
+    if (sampler.stats.unresolved !== before) continue;
+    if (proven++ < 6) assert.equal(oracle(view, x, y, limit * 4), INTERIOR, `proof at ${x},${y}`);
+  }
+  assert.ok(proven > 10 && escaped >= 4, `samples on both sides (${proven} proved, ${escaped} escaped)`);
+});
