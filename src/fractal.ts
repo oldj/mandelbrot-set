@@ -434,7 +434,12 @@ const TRAP_BAND = 2 ** -8;
  * in the main cardioid and period-2 bulb, which exact tests already settle.
  */
 const PROOF_START = 128;
-/** Generous bound on the relative rounding of one double operation chain. */
+/**
+ * Generous bound on the relative rounding of one double operation chain. A
+ * perturbation step computes δ' = (2Z + δ) δ + dc: with u = 2Z + δ, its
+ * rounding stays within a few units of 2^-53 (|u||δ| + |dc|), and
+ * |u||δ| <= 2|Z||δ| + |δ|², well inside ROUNDING (4|Z||δ| + |δ|²) + ROUNDING |dc|.
+ */
 const ROUNDING = 2 ** -50;
 /**
  * attractingCycle is tried on looser returns than the in-loop proof: within
@@ -485,8 +490,9 @@ function attractingCycle(reference: Reference, m0: number, sr: number, si: numbe
       }
       const nextD = 2 * (tr * Dr - ti * Di);
       Di = 2 * (tr * Di + ti * Dr); Dr = nextD;
-      const nextRe = 2 * (zr * dr - zi * di) + dr * dr - di * di + dcRe;
-      di = 2 * (zr * di + zi * dr + dr * di) + dcIm; dr = nextRe;
+      // δ' = (2Z + δ) δ + dc: four products on a short dependency chain.
+      const ur = zr + tr, ui = zi + ti, nextRe = ur * dr - ui * di + dcRe;
+      di = ur * di + ui * dr + dcIm; dr = nextRe;
       m++;
       const er = real[m] + dr, ei = imag[m] + di, squared = er * er + ei * ei;
       if (!(squared <= 256)) return spent + k;
@@ -551,34 +557,78 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
   let ra = 0, rb = 0, rc = 0, rd = 0, newtonRetry = 0, newtonFails = 0;
   const dcError = ROUNDING * Math.hypot(dcRe, dcIm);
   while (n < limit) {
-    steps++;
-    // Level 0 has the largest radius at m; >= also rejects squared deltas that underflow to 0.
-    const quick = first[m];
-    const level = verify || !(quick >= 1e-280 ? deltaSquared < quick : quick > 0)
-      ? -1 : lookupNative(reference, m, dr, di, limit - n);
-    const skipped = level >= 0;
-    if (skipped) {
-      const table = reference.native[level], o = ((m - 1) >> level) * NATIVE_FIELDS, length = 1 << level;
-      const ar = table[o], ai = table[o + 1], br = table[o + 2], bi = table[o + 3];
-      const nextEr = ar * er - ai * ei + br * pixel;
-      ei = ar * ei + ai * er + bi * pixel; er = nextEr;
-      const nextRe = ar * dr - ai * di + br * dcRe - bi * dcIm;
-      di = ar * di + ai * dr + br * dcIm + bi * dcRe;
-      dr = nextRe;
-      m += length; n += length; stats.skipped += length - 1;
-    } else {
-      if (verify) {
-        const reference = Math.hypot(zr, zi), delta = Math.hypot(dr, di);
-        const twice = 2 * Math.hypot(zr + dr, zi + di), rounding = ROUNDING * (4 * reference * delta + delta * delta) + dcError;
-        ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
-        rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
+    // Fast path: plain single steps, while no BLA block may apply and the step
+    // needs none of the bookkeeping below (escape, glitch, tiny |z|, a return
+    // the proofs track, a reset). Operations are those of the general path,
+    // so results are bit-identical; it just keeps the common step short.
+    let stepped = false;
+    if (!verify) {
+      while (n < limit) {
+        const quick = first[m];
+        if (quick >= 1e-280 ? deltaSquared < quick : quick > 0) break;
+        steps++;
+        const tr = zr + dr, ti = zi + di, nextEr = 2 * (tr * er - ti * ei) + pixel;
+        ei = 2 * (tr * ei + ti * er); er = nextEr;
+        const ur = zr + tr, ui = zi + ti, nextRe = ur * dr - ui * di + dcRe;
+        di = ur * di + ui * dr + dcIm;
+        dr = nextRe;
+        m++; n++;
+        zr = real[m]; zi = imag[m];
+        const totalRe = zr + dr, totalIm = zi + di, squared = totalRe * totalRe + totalIm * totalIm;
+        deltaSquared = dr * dr + di * di;
+        if (!(squared <= 256 && squared >= 1e-280) || squared < glitch[m] || n >= reset) {
+          stepped = true;
+          break;
+        }
+        // Within the tracked band, only steps the bookkeeping below acts on
+        // leave: a new minimum or near return (relative < 2^-8 |base|²), or a
+        // return attractingCycle may try now. The tests are the same ones.
+        if (squared <= far) {
+          const relative = squared - baseSquared, period = n - baseN;
+          if (relative < TRAP_BAND * baseSquared || relative < NEWTON_BAND * baseSquared && n >= newtonRetry
+            && n >= PROOF_START && period > 2 && spent + NEWTON_COST * period <= steps) {
+            stepped = true;
+            break;
+          }
+        }
+        if (squared < deltaSquared || m === end) {
+          dr = totalRe; di = totalIm; m = 0; zr = real[0]; zi = imag[0];
+          deltaSquared = squared;
+        }
       }
-      const tr = zr + dr, ti = zi + di, nextEr = 2 * (tr * er - ti * ei) + pixel;
-      ei = 2 * (tr * ei + ti * er); er = nextEr;
-      const nextRe = 2 * (zr * dr - zi * di) + dr * dr - di * di + dcRe;
-      di = 2 * (zr * di + zi * dr + dr * di) + dcIm;
-      dr = nextRe;
-      m++; n++;
+      if (!stepped && n >= limit) break;
+    }
+    let skipped = false;
+    if (!stepped) {
+      steps++;
+      // Level 0 has the largest radius at m; >= also rejects squared deltas that underflow to 0.
+      const quick = first[m];
+      const level = verify || !(quick >= 1e-280 ? deltaSquared < quick : quick > 0)
+        ? -1 : lookupNative(reference, m, dr, di, limit - n);
+      skipped = level >= 0;
+      if (skipped) {
+        const table = reference.native[level], o = ((m - 1) >> level) * NATIVE_FIELDS, length = 1 << level;
+        const ar = table[o], ai = table[o + 1], br = table[o + 2], bi = table[o + 3];
+        const nextEr = ar * er - ai * ei + br * pixel;
+        ei = ar * ei + ai * er + bi * pixel; er = nextEr;
+        const nextRe = ar * dr - ai * di + br * dcRe - bi * dcIm;
+        di = ar * di + ai * dr + br * dcIm + bi * dcRe;
+        dr = nextRe;
+        m += length; n += length; stats.skipped += length - 1;
+      } else {
+        if (verify) {
+          const reference = Math.hypot(zr, zi), delta = Math.hypot(dr, di);
+          const twice = 2 * Math.hypot(zr + dr, zi + di), rounding = ROUNDING * (4 * reference * delta + delta * delta) + dcError;
+          ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
+          rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
+        }
+        const tr = zr + dr, ti = zi + di, nextEr = 2 * (tr * er - ti * ei) + pixel;
+        ei = 2 * (tr * ei + ti * er); er = nextEr;
+        const ur = zr + tr, ui = zi + ti, nextRe = ur * dr - ui * di + dcRe;
+        di = ur * di + ui * dr + dcIm;
+        dr = nextRe;
+        m++; n++;
+      }
     }
     zr = real[m]; zi = imag[m];
     const totalRe = zr + dr, totalIm = zi + di;
