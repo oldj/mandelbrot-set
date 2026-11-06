@@ -31,7 +31,7 @@ canvas.dragging { cursor: grabbing; }
 .site-heading,
 .github-link,
 .view-info,
-.reset-view {
+.hud-button {
   box-sizing: border-box;
   border: 1px solid #c7ddff24;
   border-radius: 14px;
@@ -163,7 +163,7 @@ canvas.dragging { cursor: grabbing; }
 }
 .copy-feedback:empty { display: none; }
 
-.reset-view {
+.hud-button {
   position: relative;
   flex: none;
   display: inline-flex;
@@ -181,11 +181,33 @@ canvas.dragging { cursor: grabbing; }
   transition: border-color 140ms ease, color 140ms ease;
 }
 
-.reset-view[hidden] { display: none; }
-.reset-view svg { width: 13px; height: 13px; flex: none; }
-.reset-view:hover { border-color: #a7d7ff66; color: #eef7ff; }
-.reset-view:active { background: #20394de8; }
-.reset-view:focus-visible { outline: 2px solid #91ceff; outline-offset: 3px; }
+.hud-button[hidden] { display: none; }
+.hud-button svg { width: 13px; height: 13px; flex: none; }
+.hud-button:hover { border-color: #a7d7ff66; color: #eef7ff; }
+.hud-button:active { background: #20394de8; }
+.hud-button:focus-visible { outline: 2px solid #91ceff; outline-offset: 3px; }
+
+/* Reset and colour boost sit together on the right of the bottom row. */
+.hud-actions { position: relative; display: flex; flex: none; align-items: flex-end; gap: 8px; }
+.boost-colors[aria-pressed="true"] { border-color: #f9d36f80; color: #fbe3a0; }
+.boost-level:empty { display: none; }
+.boost-level { margin-left: 2px; font-variant-numeric: tabular-nums; opacity: 0.85; }
+.boost-feedback {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 7px 10px;
+  border: 1px solid #c7ddff24;
+  border-radius: 8px;
+  background: #101d2ef5;
+  color: #e5edf8;
+  font: 11px/1.6 system-ui, sans-serif;
+  pointer-events: none;
+}
+.boost-feedback:empty { display: none; }
 .view-info dl {
   display: grid;
   /* The zoom is short and always shown in full; the coordinates abbreviate to fit the rest. */
@@ -298,11 +320,11 @@ canvas.dragging { cursor: grabbing; }
 }
 
 @media (pointer: coarse) {
-  .reset-view { min-height: 44px; }
+  .hud-button { min-height: 44px; }
   .copy-view { width: 44px; height: 44px; }
   .coordinate-dialog button { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reset-view { transition: none; }
+  .hud-button { transition: none; }
 }

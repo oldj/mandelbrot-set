@@ -6,7 +6,9 @@ import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import { missingRegions, panRaster, shiftQuality } from './raster-cache';
 import { TileStage } from './tile-stage';
-import { formatViewHash, parseViewHash } from './url-state';
+import { formatViewHash, parseColorHash, parseViewHash } from './url-state';
+import { ANIMATION_MAPPING, chooseMapping, sameMapping } from './palette';
+import type { ColorMapping } from './palette';
 import { renderWorkerCount, workerCapacity } from './worker-policy';
 import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './reference';
 import type { OrbitData, ReferenceSpec } from './reference';
@@ -22,6 +24,10 @@ const coordinateFull = document.querySelector<HTMLElement>('#coordinate-full')!;
 const closeCoordinate = document.querySelector<HTMLButtonElement>('#close-coordinate')!;
 const zoomLabel = document.querySelector<HTMLElement>('#zoom-level')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-view')!;
+const boostButton = document.querySelector<HTMLButtonElement>('#boost-colors')!;
+const boostLevel = document.querySelector<HTMLElement>('#boost-level')!;
+const boostFeedback = document.querySelector<HTMLElement>('#boost-feedback')!;
+let boostFeedbackTimer: ReturnType<typeof setTimeout>;
 const copyButton = document.querySelector<HTMLButtonElement>('#copy-view')!;
 const copyFeedback = document.querySelector<HTMLElement>('#copy-feedback')!;
 let copyFeedbackTimer: ReturnType<typeof setTimeout>;
@@ -44,6 +50,17 @@ const passCounts = new Map<number, number>();
 /** Learned iteration budget, and the coarse-pass tally that adapts it. */
 let budgetMemory: BudgetMemory | undefined;
 let coarseSamples = 0, coarseUnresolved = 0;
+/**
+ * Colour density. Fixed while zooming and panning, so a point keeps its colour:
+ * the animation's colouring, unless the user locks a boost for a view that
+ * would be nearly one hue (chooseMapping on a full render's coarse samples).
+ */
+let colorMapping: ColorMapping = ANIMATION_MAPPING;
+let coarseValues: Float32Array[] = [];
+/** A boost was asked for; it is chosen when the next full render's coarse pass completes. */
+let boostPending = false;
+/** The boost is offered where the animation's colouring tends to flatten: beyond 2^10 times the initial view. */
+const offersBoost = (target: View) => target.logScale < initialView(cssWidth, cssHeight).logScale - 10;
 /** The finest pass every worker has finished for the current surface (255: none yet). */
 let completedStep = 255;
 const workers: Worker[] = [];
@@ -76,7 +93,11 @@ function referencePlan(shared: SharedOrbit, workerIndex: number): ReferencePlan 
   return workerIndex === 0 ? { ...plan, build: true } : plan;
 }
 
-interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number; iterations: number }
+interface Surface {
+  canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number; iterations: number;
+  /** Colour density the pixels were painted with; `full` when every pixel was (re)computed (no pan reuse). */
+  mapping: ColorMapping; full: boolean;
+}
 let surface: Surface | undefined;
 let quality = new Uint8Array();
 let stage: TileStage | undefined;
@@ -136,13 +157,62 @@ function projectedQuality(source: Surface | undefined, completed: number, width:
   return result;
 }
 
-/** Reset is only offered once the view differs from the default one. */
+/** Reset is only offered once the view (or its colours) differ from the default. */
 function updateResetButton(): void {
-  const hidden = isInitialView(view, cssWidth, cssHeight);
-  if (resetButton.hidden === hidden) return;
+  const boosted = colorMapping.stretch !== 1;
+  setHidden(resetButton, isInitialView(view, cssWidth, cssHeight) && !boosted);
+  setHidden(boostButton, !offersBoost(view) && !boosted);
+  boostButton.setAttribute('aria-pressed', String(boosted));
+  boostLevel.textContent = boosted ? ` ×${Number(colorMapping.stretch.toFixed(1))}` : '';
+}
+function setHidden(button: HTMLButtonElement, hidden: boolean): void {
+  if (button.hidden === hidden) return;
   // Keep keyboard focus somewhere useful when the focused button disappears.
-  if (hidden && document.activeElement === resetButton) canvas.focus({ preventScroll: true });
-  resetButton.hidden = hidden;
+  if (hidden && document.activeElement === button) canvas.focus({ preventScroll: true });
+  button.hidden = hidden;
+}
+
+function showBoostFeedback(text: string): void {
+  clearTimeout(boostFeedbackTimer);
+  boostFeedback.textContent = text;
+  boostFeedbackTimer = setTimeout(() => { boostFeedback.textContent = ''; }, 2600);
+}
+
+/** Lock a colour boost chosen for the surface's view (its coarse pass must be complete and full); true if it re-renders. */
+function applyBoost(): boolean {
+  boostPending = false;
+  const next = chooseMapping(joined(coarseValues));
+  if (next.stretch === 1) {
+    showBoostFeedback('当前画面的颜色已足够丰富，无需增强');
+    return false;
+  }
+  colorMapping = next;
+  showBoostFeedback(`已增强色彩 ×${Number(next.stretch.toFixed(1))}，缩放和平移时颜色保持一致`);
+  updateResetButton();
+  writeHash();
+  startRender();
+  return true;
+}
+
+function toggleBoost(): void {
+  if (!view) return;
+  if (colorMapping.stretch !== 1) {
+    colorMapping = ANIMATION_MAPPING;
+    boostPending = false;
+    showBoostFeedback('已恢复原图配色');
+    updateResetButton();
+    writeHash();
+    startRender();
+    return;
+  }
+  // The finished coarse pass of a full render of exactly this view already holds the statistics.
+  const current = surface && surface.full && completedStep <= 8 && surface.view.logScale === view.logScale
+    && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight
+    && viewOffset(surface.view, view).x === 0 && viewOffset(surface.view, view).y === 0;
+  if (current) { applyBoost(); return; }
+  boostPending = true;
+  showBoostFeedback('正在分析当前画面…');
+  startRender(true);
 }
 
 function draw(): void {
@@ -202,12 +272,15 @@ const coordinateObserver = new ResizeObserver(() => {
 coordinateObserver.observe(realLabel);
 coordinateObserver.observe(imaginaryLabel);
 
-function startRender(): void {
+/** `full`: recompute every pixel (a boost needs statistics of the whole view). */
+function startRender(full = false): void {
   clearTimeout(renderTimer);
   const iterations = chooseBudget(budgetMemory, view.logScale);
   budgetMemory = rememberUse(budgetMemory, view.logScale);
+  const mapping = colorMapping;
   // Reused pixels must come from the same budget: a larger one may resolve black pixels.
-  const pan = surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight && surface.iterations === iterations
+  const pan = !full && surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight && surface.iterations === iterations
+    && sameMapping(surface.mapping, mapping)
     && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
     ? panRaster(surface.view, view, canvas.width, canvas.height, cssWidth, cssHeight) : undefined;
   // A release or subpixel movement need not cancel useful work already in flight.
@@ -238,7 +311,9 @@ function startRender(): void {
   }
   const regions = pan ? missingRegions(quality, image.width, image.height)
     : [{ x: 0, y: 0, width: image.width, height: image.height }];
-  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations };
+  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations, mapping, full: !pan };
+  coarseValues = [];
+  canvas.dataset.colorStretch = String(mapping.stretch);
   completedStep = 255;
   generation++;
   lastRender = performance.now();
@@ -265,7 +340,7 @@ function startRender(): void {
     }
     worker.postMessage({ id: generation, view: surface!.view, width: image.width, height: image.height,
       cssWidth, cssHeight, workerIndex, workerCount: activeWorkerCount, iterations, regions,
-      reference: shared && referencePlan(shared, workerIndex) } satisfies RenderRequest);
+      reference: shared && referencePlan(shared, workerIndex), mapping } satisfies RenderRequest);
   });
   scheduleDraw();
 }
@@ -275,13 +350,20 @@ let hashTimer: ReturnType<typeof setTimeout>;
 function writeHash(): void {
   clearTimeout(hashTimer);
   if (!view) return;
-  const hash = formatViewHash(view, cssWidth, cssHeight, initialView(cssWidth, cssHeight).logScale);
+  const hash = formatViewHash(view, cssWidth, cssHeight, initialView(cssWidth, cssHeight).logScale, colorMapping);
   const url = location.pathname + location.search + (hash ? `#${hash}` : '');
   if (url !== location.pathname + location.search + location.hash) history.replaceState(history.state, '', url);
 }
 function scheduleHash(): void {
   clearTimeout(hashTimer);
   hashTimer = setTimeout(writeHash, 250);
+}
+
+function joined(parts: Float32Array[]): Float32Array {
+  const result = new Float32Array(parts.reduce((n, part) => n + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { result.set(part, offset); offset += part.length; }
+  return result;
 }
 
 function changed(): void {
@@ -320,14 +402,19 @@ function createWorker(): void {
     if (data.type === 'pass') {
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
-      if (data.step === 8) { coarseSamples += data.samples; coarseUnresolved += data.unresolved; }
+      if (data.step === 8) {
+        coarseSamples += data.samples; coarseUnresolved += data.unresolved;
+        if (data.coarse) coarseValues.push(data.coarse);
+      }
       if (count === activeWorkerCount) {
         completedStep = data.step;
         if (data.step === 8) {
           coarseReady = true;
           const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
           budgetMemory = adapted.memory;
-          if (adapted.raise) { startRender(); return; }
+          if (adapted.raise) { startRender(boostPending); return; }
+          // Only a full render samples the whole view.
+          if (boostPending && surface.full && applyBoost()) return;
         }
         if (data.step === 1) {
           flushTiles();
@@ -405,6 +492,9 @@ function resetView(): void {
   canvas.classList.remove('dragging');
   view = initialView(cssWidth, cssHeight);
   budgetMemory = undefined;
+  colorMapping = ANIMATION_MAPPING;
+  boostPending = false;
+  updateResetButton();
   writeHash(); // the default view has no hash
   startRender();
 }
@@ -418,11 +508,16 @@ window.addEventListener('hashchange', () => {
   pointers.clear();
   canvas.classList.remove('dragging');
   view = next;
+  colorMapping = parseColorHash(location.hash) ?? ANIMATION_MAPPING;
+  boostPending = false;
   budgetMemory = undefined;
+  updateResetButton();
   startRender();
 });
 
 resetButton.addEventListener('click', resetView);
+boostButton.addEventListener('click', toggleBoost);
+boostButton.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
 function showCoordinate(part: 'real' | 'imaginary'): void {
   const current = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
   coordinateTitle.textContent = part === 'real' ? '中心实部 Re' : '中心虚部 Im';
@@ -463,10 +558,9 @@ infoPanel.addEventListener('wheel', event => event.stopPropagation(), { passive:
 resetButton.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
 
 window.addEventListener('keydown', event => {
-  if (coordinateDialog.open) return;
-  if (event.key !== 'Home') return;
-  event.preventDefault();
-  resetView();
+  if (coordinateDialog.open || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key === 'Home') { event.preventDefault(); resetView(); }
+  else if (event.key === 'c' || event.key === 'C') { event.preventDefault(); toggleBoost(); }
 });
 
 function resize(): void {
@@ -478,6 +572,7 @@ function resize(): void {
   cssWidth = rect.width; cssHeight = rect.height;
   canvas.width = width; canvas.height = height;
   // A shared link opens at its view; zoom is relative to this window's initial view.
+  if (!view) colorMapping = parseColorHash(location.hash) ?? ANIMATION_MAPPING;
   view ??= parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale) ?? initialView(cssWidth, cssHeight);
   pointers.clear(); canvas.classList.remove('dragging');
   scheduleHash();
@@ -495,6 +590,7 @@ watchPixelRatio();
 window.addEventListener('pagehide', () => {
   clearTimeout(renderTimer);
   clearTimeout(copyFeedbackTimer);
+  clearTimeout(boostFeedbackTimer);
   writeHash();
   cancelAnimationFrame(frame);
   workers.forEach(worker => worker.terminate());

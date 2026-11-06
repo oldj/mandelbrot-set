@@ -1,6 +1,7 @@
 import { ensurePrecision, isInitialView } from './precision.ts';
 import type { View } from './precision.ts';
 import { formatCoordinate } from './view-info.ts';
+import type { ColorMapping } from './palette.ts';
 
 /**
  * The view as a shareable URL hash: `re=…&im=…&zoom=…`.
@@ -12,11 +13,24 @@ import { formatCoordinate } from './view-info.ts';
  * window shows the same framing rather than a different area. It is written
  * in scientific notation so depths like 10^1204 survive as text.
  */
-export function formatViewHash(view: View, width: number, height: number, initialLogScale: number): string {
-  if (isInitialView(view, width, height)) return '';
+export function formatViewHash(view: View, width: number, height: number, initialLogScale: number, mapping?: ColorMapping): string {
+  const boosted = mapping !== undefined && mapping.stretch !== 1;
+  if (!boosted && isInitialView(view, width, height)) return '';
   const re = formatCoordinate(view.re, view.bits, view.logScale);
   const im = formatCoordinate(view.im, view.bits, view.logScale);
-  return `re=${re}&im=${im}&zoom=${formatZoomText(initialLogScale - view.logScale)}`;
+  // A locked colour boost travels with the link (shortest round-trip number text, so it is exact).
+  const color = boosted ? `&color=${mapping.stretch}:${mapping.anchor}` : '';
+  return `re=${re}&im=${im}&zoom=${formatZoomText(initialLogScale - view.logScale)}${color}`;
+}
+
+/** The locked colour boost a hash carries (`color=stretch:anchor`), if any and valid. */
+export function parseColorHash(hash: string): ColorMapping | undefined {
+  const text = new URLSearchParams(hash.replace(/^#/, '')).get('color');
+  const match = text === null ? null : /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(text);
+  if (!match) return undefined;
+  const stretch = Number(match[1]), anchor = Number(match[2]);
+  if (!(stretch > 1 && stretch <= 64) || !Number.isFinite(anchor) || anchor > 1e9) return undefined;
+  return { stretch, anchor };
 }
 
 /** Magnification as plain text: 10 significant digits (edges land within ~1e-6 px), `e` notation from 10^6 or below 10^-2. */

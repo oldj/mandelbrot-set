@@ -91,3 +91,36 @@ test('shallow blues match flat areas of the first frame of the sequence', () => 
     [10.69, [13, 67, 173]], [12.7, [16, 72, 178]], [14.74, [21, 79, 182]],
   ]) assert.ok(rgb(value).every((channel, i) => Math.abs(channel - expected[i]) <= 5), `${value}: ${rgb(value)} vs ${expected}`);
 });
+
+import { ANIMATION_MAPPING, chooseMapping, colorSpread, colorWord, lapsOf } from '../src/palette.ts';
+
+test('views with enough colour keep the animation colouring exactly', () => {
+  // Shaped like the initial view: mostly low counts, a band of high ones, interior.
+  const values = Array.from({ length: 3000 }, (_, i) => i % 7 === 0 ? -1 : i % 5 === 0 ? 20 + (i % 400) : 2 + (i % 13) / 2);
+  assert.ok(colorSpread(values, ANIMATION_MAPPING) >= 48);
+  assert.equal(chooseMapping(values), ANIMATION_MAPPING);
+  for (const value of [1, 50, 999, 30000]) assert.equal(colorWord(value, { stretch: 1, anchor: 3.7 }), colorWord(value));
+});
+
+test('nearly one-hue views stretch their laps around the median colour', () => {
+  // Counts of the reported 1.5e47 view: 1360-1490, mostly near 1365.
+  const values = Array.from({ length: 4000 }, (_, i) => 1360 + 130 * ((i * 0.618) % 1) ** 3);
+  assert.ok(colorSpread(values, ANIMATION_MAPPING) < 30);
+  const mapping = chooseMapping(values);
+  assert.ok(mapping.stretch > 1 && mapping.stretch <= 32);
+  assert.ok(colorSpread(values, mapping) >= 48);
+  // The smallest stretch that reaches the target is chosen.
+  const smaller = { stretch: mapping.stretch / Math.SQRT2, anchor: mapping.anchor };
+  if (smaller.stretch > 1) assert.ok(colorSpread(values, smaller) < 48 + 8);
+  // The median keeps (nearly) the animation's colour: its turn moves by at most 0.025 laps.
+  const median = [...values].sort((a, b) => a - b)[values.length >> 1], laps = lapsOf(median);
+  const stretched = mapping.anchor + mapping.stretch * (laps - mapping.anchor);
+  assert.ok(Math.abs(stretched - laps) <= 0.0251);
+  // Deterministic, and steady under small changes of the view.
+  assert.deepEqual(chooseMapping(values), mapping);
+  assert.deepEqual(chooseMapping(values.map(v => v + 0.05)), mapping);
+});
+
+test('mostly interior views are left alone', () => {
+  assert.equal(chooseMapping(new Float32Array(3000).fill(-1)), ANIMATION_MAPPING);
+});

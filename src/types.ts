@@ -1,5 +1,6 @@
 import type { View } from './precision';
 import type { OrbitData, ReferenceSpec } from './reference';
+import type { ColorMapping } from './palette';
 
 export interface RenderRegion { x: number; y: number; width: number; height: number }
 
@@ -32,6 +33,8 @@ export interface RenderRequest {
   iterations: number;
   regions?: RenderRegion[];
   reference?: ReferencePlan;
+  /** Colour density for this view (the animation's colouring when absent). */
+  mapping?: ColorMapping;
 }
 
 /** One finished tile; `step` is the sample spacing in physical pixels. */
@@ -65,6 +68,8 @@ export interface RenderProgress {
   /** Samples this worker computed in the pass, and how many reached the budget unresolved. */
   samples: number;
   unresolved: number;
+  /** The coarse pass only: every sample's escape count (-1 interior), to choose the colour density. */
+  coarse?: Float32Array<ArrayBuffer>;
 }
 
 /** Worker -> main thread: the orbit a `build` plan produced. */

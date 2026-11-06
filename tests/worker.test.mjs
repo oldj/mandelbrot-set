@@ -187,3 +187,25 @@ test('reused coarse samples leave a deep render identical to sampling every pixe
     assert.equal(covered, 37 * 29);
   }
 });
+
+test('workers colour with the requested density and report coarse counts', async t => {
+  const { colorWord } = await import('../src/palette.ts');
+  const view = initialView(40, 30);
+  const request = { id: 1, view, width: 40, height: 30, cssWidth: 40, cssHeight: 30, iterations: 1024, workerIndex: 0, workerCount: 1 };
+  const mapping = { stretch: 4, anchor: 0.3 };
+  const worker = startWorker(t);
+  const passes = [];
+  worker.on('message', message => { if (message.type === 'pass') passes.push(message); });
+  const tiles = await collect(worker, { ...request, mapping });
+  const { createSampler } = await import('../src/fractal.ts');
+  const sampler = await createSampler(view, 40, 30, 1024, async () => {});
+  for (const tile of tiles.filter(tile => tile.step === 1)) {
+    const words = new Uint32Array(tile.pixels.buffer);
+    for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
+      assert.equal(words[row * tile.width + col], colorWord(sampler.sample(tile.x + col + 0.5 - 20, tile.y + row + 0.5 - 15), mapping));
+    }
+  }
+  const coarse = passes.find(pass => pass.step === 8);
+  assert.equal(coarse.coarse.length, coarse.samples);
+  assert.ok(passes.filter(pass => pass.step !== 8).every(pass => pass.coarse === undefined));
+});

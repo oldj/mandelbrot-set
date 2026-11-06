@@ -82,17 +82,88 @@ const packed = new Uint32Array(SIZE);
   }
 }
 const INTERIOR_WORD = new Uint32Array(new Uint8ClampedArray([0, 0, 0, 255]).buffer)[0];
+const scratch = new Uint32Array(1), scratchBytes = new Uint8Array(scratch.buffer);
+
+/** Continuous position on the gradient, in laps (the fractional part is the turn). */
+export function lapsOf(value: number): number {
+  if (value < LAST_COUNT) return Math.sqrt(Math.max(0, value + ROOT_OFFSET)) / LAP_ROOT;
+  return LAST_ROOT / LAP_ROOT + (value - LAST_COUNT) / COLOR_PERIOD;
+}
+
+/**
+ * Colour density for one view. Deep views often span only a sliver of a lap
+ * (the animation's own deep frames are nearly one hue), so such a view may
+ * run through its laps `stretch` times faster, around `anchor` (in laps):
+ * the view's median keeps the animation's colour, the rest spreads out.
+ * stretch 1 is the animation's colouring exactly.
+ */
+export interface ColorMapping { stretch: number; anchor: number }
+export const ANIMATION_MAPPING: ColorMapping = { stretch: 1, anchor: 0 };
 
 /** The pixel colour as a packed RGBA word (platform byte order, as a Uint32Array view of RGBA bytes). */
-export function colorWord(value: number): number {
+export function colorWord(value: number, mapping: ColorMapping = ANIMATION_MAPPING): number {
   // Only -1 is the sampler's interior sentinel. Far-away escaping points can
   // have other negative smooth counts and must retain the exterior colour.
   if (value === -1) return INTERIOR_WORD;
-  return packed[Math.min(SIZE - 1, Math.floor(turnOf(value) * SIZE))];
+  let turn: number;
+  if (mapping.stretch === 1) turn = turnOf(value);
+  else {
+    const laps = mapping.anchor + mapping.stretch * (lapsOf(value) - mapping.anchor);
+    turn = laps - Math.floor(laps);
+  }
+  return packed[Math.min(SIZE - 1, Math.floor(turn * SIZE))];
 }
 
-const scratch = new Uint32Array(1), scratchBytes = new Uint8Array(scratch.buffer);
-export function color(value: number, pixels: Uint8ClampedArray, offset: number): void {
-  scratch[0] = colorWord(value);
+export function sameMapping(a: ColorMapping, b: ColorMapping): boolean {
+  return a.stretch === b.stretch && a.anchor === b.anchor;
+}
+
+/** RMS colour distance from the mean colour (RGB levels), interior counted as black. */
+const MIN_SPREAD = 48;
+const MAX_STRETCH_STEPS = 10; // stretch up to 2^5 = 32, in steps of sqrt(2)
+const spreadBytes = scratchBytes;
+export function colorSpread(values: ArrayLike<number>, mapping: ColorMapping): number {
+  let r = 0, g = 0, b = 0, r2 = 0, g2 = 0, b2 = 0;
+  for (let i = 0; i < values.length; i++) {
+    scratch[0] = colorWord(values[i], mapping);
+    const x = spreadBytes[0], y = spreadBytes[1], z = spreadBytes[2];
+    r += x; g += y; b += z; r2 += x * x; g2 += y * y; b2 += z * z;
+  }
+  const n = values.length || 1;
+  return Math.sqrt(Math.max(0, (r2 - r * r / n + g2 - g * g / n + b2 - b * b / n) / n / 3));
+}
+
+/**
+ * The colour density for a view from its coarse samples (escape counts, -1
+ * for interior). Views already varied enough keep the animation's colouring;
+ * flatter ones get the smallest stretch that reaches MIN_SPREAD, anchored on
+ * their median. Quantised (stretch in sqrt(2) steps, the anchor so it moves
+ * colours by at most ~0.025 laps), so a view always gets the same mapping
+ * and small changes of view do not shift colours.
+ */
+export function chooseMapping(values: ArrayLike<number>): ColorMapping {
+  // A deterministic subsample keeps this cheap on the main thread.
+  const stride = Math.max(1, Math.floor(values.length / 4096));
+  const sample: number[] = [], escaped: number[] = [];
+  for (let i = 0; i < values.length; i += stride) {
+    sample.push(values[i]);
+    if (values[i] !== -1) escaped.push(lapsOf(values[i]));
+  }
+  if (escaped.length < 64 || colorSpread(sample, ANIMATION_MAPPING) >= MIN_SPREAD) return ANIMATION_MAPPING;
+  escaped.sort((a, b) => a - b);
+  const median = escaped[escaped.length >> 1];
+  let best = ANIMATION_MAPPING, bestSpread = -1;
+  for (let k = 1; k <= MAX_STRETCH_STEPS; k++) {
+    const stretch = 2 ** (k / 2), step = 0.05 / (stretch - 1);
+    const mapping = { stretch, anchor: Math.round(median / step) * step };
+    const spread = colorSpread(sample, mapping);
+    if (spread >= MIN_SPREAD) return mapping;
+    if (spread > bestSpread) { best = mapping; bestSpread = spread; }
+  }
+  return best;
+}
+
+export function color(value: number, pixels: Uint8ClampedArray, offset: number, mapping: ColorMapping = ANIMATION_MAPPING): void {
+  scratch[0] = colorWord(value, mapping);
   pixels.set(scratchBytes, offset);
 }
