@@ -3,17 +3,32 @@ import { initialView, transformView, viewOffset } from './precision';
 import type { Point, View } from './precision';
 import { iterationBudget } from './fractal';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
+import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import type { RenderMessage, RenderRequest } from './types';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
+const infoPanel = document.querySelector<HTMLElement>('#view-info')!;
+const realLabel = document.querySelector<HTMLButtonElement>('#centre-real')!;
+const imaginaryLabel = document.querySelector<HTMLButtonElement>('#centre-imag')!;
+const coordinateDialog = document.querySelector<HTMLDialogElement>('#coordinate-dialog')!;
+const coordinateTitle = document.querySelector<HTMLElement>('#coordinate-title')!;
+const coordinateFull = document.querySelector<HTMLElement>('#coordinate-full')!;
+const closeCoordinate = document.querySelector<HTMLButtonElement>('#close-coordinate')!;
+const zoomLabel = document.querySelector<HTMLElement>('#zoom-level')!;
+const resetButton = document.querySelector<HTMLButtonElement>('#reset-view')!;
+const copyButton = document.querySelector<HTMLButtonElement>('#copy-view')!;
+const copyFeedback = document.querySelector<HTMLElement>('#copy-feedback')!;
+let copyFeedbackTimer: ReturnType<typeof setTimeout>;
 const context = canvas.getContext('2d', { alpha: false });
 if (!context) throw new Error('浏览器无法创建 Canvas 2D 上下文。');
 const ctx = context;
-const help = '滚轮缩放 · 拖拽平移 · 双指缩放 · Home 恢复全貌';
-canvas.title = help;
 canvas.tabIndex = 0;
 let cssWidth = 1, cssHeight = 1;
 let view: View;
+let infoView: View | undefined;
+let infoWidth = 0, infoHeight = 0;
+let info: ReturnType<typeof viewInfo>;
+let coordinateLayoutDirty = true;
 let frame = 0;
 let generation = 0;
 let lastRender = -Infinity;
@@ -42,6 +57,29 @@ function project(target: CanvasRenderingContext2D, source: Surface, destination:
 
 function draw(): void {
   frame = 0;
+  if (infoView !== view || infoWidth !== cssWidth || infoHeight !== cssHeight) {
+    info = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
+    zoomLabel.textContent = info.zoom;
+    infoView = view; infoWidth = cssWidth; infoHeight = cssHeight;
+    coordinateLayoutDirty = true;
+  }
+  if (coordinateLayoutDirty) {
+    for (const [label, full] of [[realLabel, info.real], [imaginaryLabel, info.imaginary]] as const) {
+      const style = getComputedStyle(label);
+      // The font shorthand can be empty when font-variant-numeric is set.
+      ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const spacing = parseFloat(style.letterSpacing) || 0;
+      const available = Math.max(0, label.clientWidth - 1);
+      const characterWidth = ctx.measureText('0').width + spacing;
+      let budget = Math.max(5, Math.min(23, Math.floor(available / Math.max(1, characterWidth))));
+      let compact = compactCoordinate(full, budget);
+      while (budget > 5 && ctx.measureText(compact).width + spacing * (compact.length - 1) > available) {
+        compact = compactCoordinate(full, --budget);
+      }
+      label.textContent = compact;
+    }
+    coordinateLayoutDirty = false;
+  }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#050914';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -62,6 +100,13 @@ function draw(): void {
 function scheduleDraw(): void {
   if (!frame) frame = requestAnimationFrame(draw);
 }
+
+const coordinateObserver = new ResizeObserver(() => {
+  coordinateLayoutDirty = true;
+  scheduleDraw();
+});
+coordinateObserver.observe(realLabel);
+coordinateObserver.observe(imaginaryLabel);
 
 function startRender(): void {
   clearTimeout(renderTimer);
@@ -120,7 +165,7 @@ for (let i = 0; i < workerCount; i++) {
           canvas.dataset.rendered = 'true';
           canvas.dataset.renderMs = String(Math.round(performance.now() - lastRender));
           canvas.setAttribute('aria-busy', 'false');
-          canvas.title = help;
+          canvas.title = '';
         }
       }
       return;
@@ -200,11 +245,58 @@ canvas.addEventListener('pointercancel', releasePointer);
 canvas.addEventListener('lostpointercapture', releasePointer);
 window.addEventListener('blur', () => { pointers.clear(); canvas.classList.remove('dragging'); });
 
-window.addEventListener('keydown', event => {
-  if (event.key !== 'Home') return;
-  event.preventDefault();
+function resetView(): void {
+  pointers.clear();
+  canvas.classList.remove('dragging');
   view = initialView(cssWidth, cssHeight);
   startRender();
+}
+
+resetButton.addEventListener('click', resetView);
+function showCoordinate(part: 'real' | 'imaginary'): void {
+  const current = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
+  coordinateTitle.textContent = part === 'real' ? '中心实部 Re' : '中心虚部 Im';
+  coordinateFull.textContent = current[part];
+  if (!coordinateDialog.open) coordinateDialog.showModal();
+}
+realLabel.addEventListener('click', () => showCoordinate('real'));
+imaginaryLabel.addEventListener('click', () => showCoordinate('imaginary'));
+closeCoordinate.addEventListener('click', () => coordinateDialog.close());
+coordinateDialog.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
+
+copyButton.addEventListener('click', async () => {
+  if (copyButton.disabled) return;
+  clearTimeout(copyFeedbackTimer);
+  copyButton.disabled = true;
+  copyButton.dataset.state = 'pending';
+  copyFeedback.textContent = '正在复制…';
+  try {
+    // Snapshot the current view, including all coordinate digits, even before the next paint.
+    const text = viewClipboardText(view, initialView(cssWidth, cssHeight).logScale);
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(text);
+    copyButton.dataset.state = 'copied';
+    copyFeedback.textContent = '已复制坐标和放大倍率';
+  } catch {
+    copyButton.dataset.state = 'error';
+    copyFeedback.textContent = '复制失败，请重试或手动选择坐标。';
+  } finally {
+    copyButton.disabled = false;
+    copyFeedbackTimer = setTimeout(() => {
+      copyFeedback.textContent = '';
+      copyButton.dataset.state = 'idle';
+    }, copyButton.dataset.state === 'copied' ? 2000 : 4000);
+  }
+});
+// Interacting with the information controls must not zoom the fractal underneath.
+infoPanel.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
+resetButton.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
+
+window.addEventListener('keydown', event => {
+  if (coordinateDialog.open) return;
+  if (event.key !== 'Home') return;
+  event.preventDefault();
+  resetView();
 });
 
 function resize(): void {
@@ -230,6 +322,7 @@ function watchPixelRatio(): void {
 watchPixelRatio();
 window.addEventListener('pagehide', () => {
   clearTimeout(renderTimer);
+  clearTimeout(copyFeedbackTimer);
   cancelAnimationFrame(frame);
   workers.forEach(worker => worker.terminate());
 });
