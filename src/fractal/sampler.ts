@@ -5,6 +5,7 @@ import { add, extended, ZERO } from '../math/extended.ts';
 import { fixedToNumber, scaledFixed } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
 import { directDouble, directFixed, directRow, insideFixed } from './direct.ts';
+import type { CycleHint } from './direct.ts';
 import { INTERIOR, lastSample } from './escape.ts';
 import { attractingCycle, HINT_PASSES, provedCycle, ROUNDING } from './interior.ts';
 import { buildReference, EXTENDED_LOG_SCALE } from './orbit.ts';
@@ -43,12 +44,14 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
     const cr = fixedToNumber(view.re, view.bits), ci = fixedToNumber(view.im, view.bits);
     const scale = 2 ** view.logScale;
     let row = new Float64Array(0);
+    // Carried across rows: neighbouring rows usually share their interior components.
+    const hint: CycleHint = { found: false, re: 0, im: 0, period: 0, successes: 0, failures: 0, skipped: 0 };
     return { stats,
       sample(x, y) { lastSample.distance = NaN; return directDouble(cr + x * scale, ci - y * scale, limit, scale); },
       row(xs, count, y, out, distances) {
         if (row.length < count) row = new Float64Array(count);
         for (let i = 0; i < count; i++) row[i] = cr + xs[i] * scale;
-        stats.unresolved += directRow(row, ci - y * scale, count, limit, out, distances, scale);
+        stats.unresolved += directRow(row, ci - y * scale, count, limit, out, distances, scale, hint);
       } };
   }
   const logRadius = viewLogRadius(view, cssWidth, cssHeight);

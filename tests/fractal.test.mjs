@@ -141,12 +141,14 @@ test('three-lane rows are bit-identical to directDouble, including proven interi
   const views = [[-0.6, 0, 3.4 / 256, 1024], [-0.122561166876, 0.744861766619, 2 ** -12, 1024], [-0.7436438870371587, 0.13182590420531197, 2 ** -30, 4096],
     [-1.25, 0, 2 ** -12, 4096], [-0.75, 0.05, 2 ** -14, 4096], [0.25, 0, 2 ** -16, 4096]];
   for (const [cx, cy, scale, limit] of views) {
+    // Cycles proved in one row seed the next ones; results must not depend on that.
+    const hint = { found: false, re: 0, im: 0, period: 0, successes: 0, failures: 0, skipped: 0 };
     const xs = new Float64Array(97), out = new Float64Array(97);
     for (let j = 0; j < 24; j++) {
       const ci = cy + (j - 12) * scale * 5;
       for (let i = 0; i < xs.length; i++) xs[i] = cx + (i - 48) * scale;
       const distances = new Float64Array(97);
-      directRow(xs, ci, xs.length, limit, out, distances, scale);
+      directRow(xs, ci, xs.length, limit, out, distances, scale, hint);
       for (let i = 0; i < xs.length; i++) {
         const value = directDouble(xs[i], ci, limit, scale), distance = value === INTERIOR ? NaN : lastDistance();
         assert.ok(Object.is(out[i], value), `${cx},${cy} row ${j} col ${i}`);
@@ -275,4 +277,28 @@ test('interior proofs seeded by a neighbour\'s cycle do not depend on the order 
   const interior = forwards.values.filter(([value]) => value === INTERIOR).length;
   assert.ok(interior > 10 && interior < xs.length - 5, `both sides of the boundary (${interior} interior)`);
   assert.ok(forwards.unresolved < interior / 2, `most interior samples are proved (${forwards.unresolved} of ${interior} unresolved)`);
+});
+
+test('rows prove interiors near a bulb root from attracting cycles, still identical to directDouble', () => {
+  // Just inside the period-3 bulb near its root on the main cardioid, orbits creep towards their cycle
+  // (|λ| close to 1), so close returns, and with them disk proofs, come late or never within the budget.
+  const cx = -0.125, cy = 0.649519052838329, scale = 2 ** -16, limit = 4096, n = 97;
+  const xs = new Float64Array(n), out = new Float64Array(n), distances = new Float64Array(n);
+  const hint = { found: false, re: 0, im: 0, period: 0, successes: 0, failures: 0, skipped: 0 };
+  let unresolved = 0, interior = 0;
+  for (let j = 0; j < 24; j++) {
+    const ci = cy + (j - 12) * scale * 4;
+    for (let i = 0; i < n; i++) xs[i] = cx + (i - 48) * scale * 4;
+    unresolved += directRow(xs, ci, n, limit, out, distances, scale, hint);
+    for (let i = 0; i < n; i++) {
+      const value = directDouble(xs[i], ci, limit, scale);
+      // A wrong proof would turn a pixel that escapes within the budget into INTERIOR.
+      assert.ok(Object.is(out[i], value), `row ${j} col ${i}: ${out[i]} vs ${value}`);
+      if (value === INTERIOR) interior++;
+    }
+  }
+  assert.ok(interior > 2000, `mostly interior (${interior})`);
+  // Waiting for close returns alone leaves about 1000 of these unresolved at this budget.
+  assert.ok(unresolved < 150, `proved rather than unresolved (${unresolved} unresolved)`);
+  assert.ok(hint.successes > 0, 'neighbouring pixels reuse proved cycles');
 });

@@ -82,6 +82,87 @@ export function trappedDouble(cr: number, ci: number, zr: number, zi: number, pe
 }
 
 /**
+ * The cycle of the last attractingCycleDouble proof, as a hint for the next
+ * pixel of a row (see provedCycle; the same argument makes it order-free).
+ */
+export const provedDoubleCycle = { found: false, re: 0, im: 0, period: 0, hopeless: false };
+/** directRow tries attractingCycleDouble on returns within 2^-5 of the saved point (2^-10 in squared terms). */
+export const DIRECT_NEWTON_RETURN_SQUARED = 2 ** -10;
+
+/**
+ * The least period of the cycle through w (a refined cycle point), among the
+ * divisors of `period`, which returns often only detect as a multiple (rows
+ * compare states 32 steps apart). Hints then cost 4 laps of the true cycle.
+ */
+function cyclePeriod(cr: number, ci: number, wr: number, wi: number, period: number): number {
+  const tolerance = 2 ** -30 * (Math.abs(wr) + Math.abs(wi)) + 1e-300;
+  let re = wr, im = wi;
+  for (let k = 1; k < period; k++) {
+    const next = re * re - im * im + cr;
+    im = 2 * re * im + ci; re = next;
+    if (period % k === 0 && Math.abs(re - wr) + Math.abs(im - wi) < tolerance) return k;
+  }
+  return period;
+}
+
+/**
+ * attractingCycle for plain doubles (shallow views): Newton's method on
+ * f^P(w) = w from w, then the disk check of trappedDouble around the refined
+ * point, for four radii. A disk that f^P maps into itself contains an
+ * attracting cycle, which attracts the critical point 0 (Fatou), so c is
+ * interior. Returns the steps spent, negated when the proof succeeded;
+ * provedDoubleCycle.hopeless tells when Newton settled on a cycle that gave no
+ * proof: one with |λ| >= 1, or one too weakly attracting for the disk check.
+ */
+export function attractingCycleDouble(cr: number, ci: number, wr: number, wi: number, period: number,
+  passes = NEWTON_PASSES): number {
+  const cMagnitude = Math.hypot(cr, ci);
+  provedDoubleCycle.hopeless = false;
+  let spent = 0, radius0 = 0, previousStep = Infinity;
+  for (let pass = 0; pass < passes; pass++) {
+    // One lap from w: f^P(w), its derivative D = (f^P)'(w) and, after the first
+    // pass, bounds ra..rd on the images of D(w, r), as in trappedDouble.
+    const check = pass > 0;
+    let ra = radius0, rb = radius0 * 16, rc = radius0 * 256, rd = radius0 * 4096;
+    let re = wr, im = wi, Dr = 1, Di = 0;
+    for (let k = 0; k < period; k++) {
+      const r2 = re * re, i2 = im * im;
+      if (check) {
+        const twice = 2 * Math.sqrt(r2 + i2 + TINY_SQUARE), rounding = ROUNDING * (r2 + i2 + cMagnitude);
+        ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
+        rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
+      }
+      const nextD = 2 * (re * Dr - im * Di);
+      Di = 2 * (re * Di + im * Dr); Dr = nextD;
+      im = 2 * re * im + ci; re = r2 - i2 + cr;
+      if (!(re * re + im * im <= 256)) return spent + k;
+    }
+    spent += period;
+    const gr = re - wr, gi = im - wi, lambda = magnitude(Dr, Di);
+    if (check) {
+      const gap = magnitude(gr, gi) + ROUNDING * (magnitude(re, im) + magnitude(wr, wi));
+      if (gap + ra < radius0 || gap + rb < radius0 * 16 || gap + rc < radius0 * 256 || gap + rd < radius0 * 4096) {
+        provedDoubleCycle.found = true; provedDoubleCycle.re = wr; provedDoubleCycle.im = wi;
+        provedDoubleCycle.period = cyclePeriod(cr, ci, wr, wi, period);
+        return -spent;
+      }
+    }
+    // Newton for g(w) = f^P(w) - w, stopping as attractingCycle does.
+    const ar = Dr - 1, ai = Di, den = ar * ar + ai * ai;
+    const stepRe = (gr * ar + gi * ai) / den, stepIm = (gi * ar - gr * ai) / den;
+    const step = magnitude(stepRe, stepIm), size = magnitude(wr, wi);
+    // Settled on a cycle that does not attract (|λ| >= 1), or steps stopped shrinking: retrying this orbit is futile.
+    if (!(lambda < 1) && !(step > 2 ** -8 * size)) { provedDoubleCycle.hopeless = true; break; }
+    if (!(step < previousStep) && pass > 2) { provedDoubleCycle.hopeless = true; break; }
+    wr -= stepRe; wi -= stepIm;
+    previousStep = step;
+    radius0 = lambda < 1 ? 4 * (step + ROUNDING * size + Number.MIN_VALUE) / (1 - lambda) : 0;
+    if (pass === passes - 1) provedDoubleCycle.hopeless = true;
+  }
+  return spent;
+}
+
+/**
  * Interior proof by an attracting cycle. The orbit of an interior point can
  * take a very long time to settle near its cycle (each lap of a period-844
  * cycle may bring it only ~12% closer), so waiting for a close return, as
