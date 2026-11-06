@@ -38,5 +38,5 @@ export function viewInfo(view: View, initialLogScale: number): { real: string; i
 
 export function viewClipboardText(view: View, initialLogScale: number): string {
   const info = viewInfo(view, initialLogScale);
-  return `Mandelbrot Set\n中心 Re: ${info.real}\n中心 Im: ${info.imaginary}\n放大倍率: ${info.zoom}`;
+  return `Mandelbrot set\nCenter (Re): ${info.real}\nCenter (Im): ${info.imaginary}\nZoom: ${info.zoom}`;
 }

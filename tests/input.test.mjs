@@ -261,11 +261,11 @@ test('copy uses the latest view before painting and includes both coordinates an
   await button.listeners.get('click')[0]();
   assert.equal(button.dataset.state, 'copied');
   assert.equal(button.disabled, false);
-  assert.equal(h.elements.get('#copy-feedback').textContent, '已复制坐标和放大倍率');
+  assert.equal(h.elements.get('#copy-feedback').textContent, 'Position and zoom copied');
   h.flush(); h.flushFrames();
   assert.equal(h.clipboardWrites.length, 1);
-  assert.equal(h.clipboardWrites[0], `Mandelbrot Set\n中心 Re: ${h.elements.get('#centre-real').textContent}\n中心 Im: ${h.elements.get('#centre-imag').textContent}\n放大倍率: ${h.elements.get('#zoom-level').textContent}`);
-  assert.ok(!h.clipboardWrites[0].includes('放大倍率: 1.00×'));
+  assert.equal(h.clipboardWrites[0], `Mandelbrot set\nCenter (Re): ${h.elements.get('#centre-real').textContent}\nCenter (Im): ${h.elements.get('#centre-imag').textContent}\nZoom: ${h.elements.get('#zoom-level').textContent}`);
+  assert.ok(!h.clipboardWrites[0].includes('Zoom: 1.00×'));
   assert.equal(h.elements.get('#copy-feedback').textContent, '');
 });
 
@@ -276,7 +276,7 @@ test('clipboard denial and unavailable API show failure, never false success', a
     await button.listeners.get('click')[0]();
     assert.equal(button.dataset.state, 'error');
     assert.equal(button.disabled, false);
-    assert.match(h.elements.get('#copy-feedback').textContent, /复制失败/);
+    assert.match(h.elements.get('#copy-feedback').textContent, /Couldn’t copy/);
   }
 });
 
@@ -292,7 +292,7 @@ test('abbreviated coordinates open full values while clipboard retains the compl
   assert.ok(h.elements.get('#centre-imag').textContent.includes('…'));
   h.elements.get('#centre-real').emit('click');
   assert.equal(h.elements.get('#coordinate-dialog').open, true);
-  assert.equal(h.elements.get('#coordinate-title').textContent, '中心实部 Re');
+  assert.equal(h.elements.get('#coordinate-title').textContent, 'Center · real part (Re)');
   assert.equal(h.elements.get('#coordinate-full').textContent, real);
   assert.equal(h.elements.get('#coordinate-dialog').emit('wheel').stopped, true);
   const id = h.request().id;
@@ -304,7 +304,7 @@ test('abbreviated coordinates open full values while clipboard retains the compl
   assert.equal(h.elements.get('#coordinate-full').textContent, imaginary);
   h.elements.get('#close-coordinate').emit('click');
   await h.elements.get('#copy-view').listeners.get('click')[0]();
-  assert.ok(h.clipboardWrites[0].includes(`中心 Re: ${real}\n中心 Im: ${imaginary}`));
+  assert.ok(h.clipboardWrites[0].includes(`Center (Re): ${real}\nCenter (Im): ${imaginary}`));
   assert.ok(!h.clipboardWrites[0].includes('…'));
 });
 

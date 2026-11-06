@@ -26,7 +26,7 @@ const copyButton = document.querySelector<HTMLButtonElement>('#copy-view')!;
 const copyFeedback = document.querySelector<HTMLElement>('#copy-feedback')!;
 let copyFeedbackTimer: ReturnType<typeof setTimeout>;
 const context = canvas.getContext('2d', { alpha: false });
-if (!context) throw new Error('浏览器无法创建 Canvas 2D 上下文。');
+if (!context) throw new Error('This browser can’t create a 2D canvas context.');
 const ctx = context;
 canvas.tabIndex = 0;
 let cssWidth = 1, cssHeight = 1;
@@ -311,7 +311,7 @@ function createWorker(): void {
     }
     if (data.id !== generation || !surface) return;
     if (data.type === 'error') {
-      canvas.title = `绘制失败：${data.message}。按 Home 重试。`;
+      canvas.title = `Rendering failed: ${data.message}. Press Home to try again.`;
       canvas.dataset.rendered = 'error';
       canvas.setAttribute('aria-busy', 'false');
       console.error(data.message);
@@ -344,7 +344,7 @@ function createWorker(): void {
     scheduleDraw();
   };
   worker.onerror = event => {
-    canvas.title = '绘制线程异常，请刷新页面重试。';
+    canvas.title = 'The renderer stopped unexpectedly. Reload the page to try again.';
     canvas.dataset.rendered = 'error';
     canvas.setAttribute('aria-busy', 'false');
     console.error(event.message);
@@ -425,7 +425,7 @@ window.addEventListener('hashchange', () => {
 resetButton.addEventListener('click', resetView);
 function showCoordinate(part: 'real' | 'imaginary'): void {
   const current = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
-  coordinateTitle.textContent = part === 'real' ? '中心实部 Re' : '中心虚部 Im';
+  coordinateTitle.textContent = part === 'real' ? 'Center · real part (Re)' : 'Center · imaginary part (Im)';
   coordinateFull.textContent = current[part];
   if (!coordinateDialog.open) coordinateDialog.showModal();
 }
@@ -439,17 +439,17 @@ copyButton.addEventListener('click', async () => {
   clearTimeout(copyFeedbackTimer);
   copyButton.disabled = true;
   copyButton.dataset.state = 'pending';
-  copyFeedback.textContent = '正在复制…';
+  copyFeedback.textContent = 'Copying…';
   try {
     // Snapshot the current view, including all coordinate digits, even before the next paint.
     const text = viewClipboardText(view, initialView(cssWidth, cssHeight).logScale);
     if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
     await navigator.clipboard.writeText(text);
     copyButton.dataset.state = 'copied';
-    copyFeedback.textContent = '已复制坐标和放大倍率';
+    copyFeedback.textContent = 'Position and zoom copied';
   } catch {
     copyButton.dataset.state = 'error';
-    copyFeedback.textContent = '复制失败，请重试或手动选择坐标。';
+    copyFeedback.textContent = 'Couldn’t copy. Try again, or open a coordinate and select it.';
   } finally {
     copyButton.disabled = false;
     copyFeedbackTimer = setTimeout(() => {

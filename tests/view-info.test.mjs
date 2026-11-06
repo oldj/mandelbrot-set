@@ -32,8 +32,8 @@ test('copied deep coordinates retain all displayed precision without truncation'
   const view = ensurePrecision({ re: 0n, im: 0n, bits: 192, logScale: -2000 });
   view.re = -(1n << BigInt(view.bits)) + scaledFixed(1, view.logScale, view.bits);
   const text = viewClipboardText(view, -8);
-  assert.ok(text.includes(`中心 Re: ${formatCoordinate(view.re, view.bits, view.logScale)}`));
-  assert.ok(text.includes(`中心 Im: ${formatCoordinate(view.im, view.bits, view.logScale)}`));
+  assert.ok(text.includes(`Center (Re): ${formatCoordinate(view.re, view.bits, view.logScale)}`));
+  assert.ok(text.includes(`Center (Im): ${formatCoordinate(view.im, view.bits, view.logScale)}`));
   assert.ok(text.length > 1200);
   assert.ok(!text.includes('…'));
   assert.ok(!text.includes('Infinity'));
