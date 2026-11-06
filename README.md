@@ -191,6 +191,7 @@ npm run preview
 
 ```text
 index.html               页面骨架（信息面板、对话框）
+public/                  站点图标（由 npm run icons 用 scripts/favicon.mjs 生成）
 src/
   main.ts                应用入口：画布与视图、输入（滚轮、拖拽、双指、Home、URL hash）、渲染调度
   style.css              页面与毛玻璃面板样式
@@ -220,7 +221,7 @@ src/
     url-state.ts         视图与 URL hash 的互相转换
     gestures.ts          滚轮与指针手势
 tests/                   node:test 测试，文件名对应被测模块（input.test.mjs 用模拟 DOM 测试 main.ts）
-scripts/                 性能基准
+scripts/                 性能基准与图标生成
 ```
 
 算法主要参考 Claude Heiland-Allen 的 [Deep Zoom](https://mathr.co.uk/web/deep-zoom.html) 与 [Deep zoom theory and practice](https://mathr.co.uk/blog/2021-05-14_deep_zoom_theory_and_practice.html)。
