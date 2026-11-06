@@ -6,6 +6,7 @@ import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import { missingRegions, panRaster, shiftQuality } from './raster-cache';
 import { TileStage } from './tile-stage';
+import { formatViewHash, parseViewHash } from './url-state';
 import { renderWorkerCount, workerCapacity } from './worker-policy';
 import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './reference';
 import type { OrbitData, ReferenceSpec } from './reference';
@@ -269,8 +270,23 @@ function startRender(): void {
   scheduleDraw();
 }
 
+/** Mirror the view in the URL hash (replaceState: zooming must not flood the history). */
+let hashTimer: ReturnType<typeof setTimeout>;
+function writeHash(): void {
+  clearTimeout(hashTimer);
+  if (!view) return;
+  const hash = formatViewHash(view, cssWidth, cssHeight, initialView(cssWidth, cssHeight).logScale);
+  const url = location.pathname + location.search + (hash ? `#${hash}` : '');
+  if (url !== location.pathname + location.search + location.hash) history.replaceState(history.state, '', url);
+}
+function scheduleHash(): void {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(writeHash, 250);
+}
+
 function changed(): void {
   scheduleDraw();
+  scheduleHash();
   clearTimeout(renderTimer);
   // Continue supplying new detail during a long drag; never starve expensive references.
   if (coarseReady && performance.now() - lastRender > 180) startRender();
@@ -389,8 +405,22 @@ function resetView(): void {
   canvas.classList.remove('dragging');
   view = initialView(cssWidth, cssHeight);
   budgetMemory = undefined;
+  writeHash(); // the default view has no hash
   startRender();
 }
+
+// Edited or navigated hashes (back/forward) move the view; replaceState does not fire this.
+window.addEventListener('hashchange', () => {
+  if (!view) return;
+  if (location.hash.length <= 1) { resetView(); return; }
+  const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
+  if (!next) return;
+  pointers.clear();
+  canvas.classList.remove('dragging');
+  view = next;
+  budgetMemory = undefined;
+  startRender();
+});
 
 resetButton.addEventListener('click', resetView);
 function showCoordinate(part: 'real' | 'imaginary'): void {
@@ -447,8 +477,10 @@ function resize(): void {
   if (view && width === canvas.width && height === canvas.height && cssWidth === rect.width && cssHeight === rect.height) return;
   cssWidth = rect.width; cssHeight = rect.height;
   canvas.width = width; canvas.height = height;
-  view ??= initialView(cssWidth, cssHeight);
+  // A shared link opens at its view; zoom is relative to this window's initial view.
+  view ??= parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale) ?? initialView(cssWidth, cssHeight);
   pointers.clear(); canvas.classList.remove('dragging');
+  scheduleHash();
   startRender();
 }
 new ResizeObserver(resize).observe(canvas);
@@ -463,6 +495,7 @@ watchPixelRatio();
 window.addEventListener('pagehide', () => {
   clearTimeout(renderTimer);
   clearTimeout(copyFeedbackTimer);
+  writeHash();
   cancelAnimationFrame(frame);
   workers.forEach(worker => worker.terminate());
 });

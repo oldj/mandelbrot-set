@@ -10,10 +10,17 @@ import { formatCoordinate } from '../src/view-info.ts';
 const bundle = await build({ entryPoints: ['src/main.ts'], bundle: true, write: false, format: 'iife',
   loader: { '.css': 'empty' }, define: { 'import.meta.url': '"http://localhost/src/main.ts"' } });
 
-function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {} } = {}) {
+function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '' } = {}) {
   const canvases = [], workers = [], timers = new Map(), frames = new Map(), mediaQueries = [];
   const clipboardWrites = [];
   const resizeObservers = [];
+  const location = { pathname: '/', search: '', hash, reload() {} };
+  const replaced = [];
+  const history = { state: null, replaceState(state, title, url) {
+    replaced.push(url);
+    const index = url.indexOf('#');
+    location.hash = index < 0 ? '' : url.slice(index);
+  } };
   let timerId = 0;
   class Target {
     listeners = new Map();
@@ -59,7 +66,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   window.devicePixelRatio = dpr;
   const globals = {
     document: { querySelector: selector => elements.get(selector), createElement: () => new Canvas() },
-    window, navigator: { hardwareConcurrency: cores, clipboard: clipboardWrite ? {
+    window, location, history, URLSearchParams, navigator: { hardwareConcurrency: cores, clipboard: clipboardWrite ? {
       writeText: async text => { clipboardWrites.push(text); await clipboardWrite(text); },
     } : undefined }, Worker: FakeWorker, URL,
     getComputedStyle: () => ({ font: '', fontSize: '11px', fontFamily: 'monospace', fontWeight: '400', letterSpacing: '0.11px' }),
@@ -78,11 +85,12 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
   const flushFrames = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); };
-  return { canvas, window, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, request: () => workers[0].messages.at(-1) };
+  return { canvas, window, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
 }
 function complexAt(view, x, y) {
   return [view.re + scaledFixed(x - 400, view.logScale, view.bits), view.im - scaledFixed(y - 300, view.logScale, view.bits)];
 }
+const abs = n => n < 0n ? -n : n;
 function near(a, b) { assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`); }
 
 function completeRegion(h, region) {
@@ -412,4 +420,39 @@ test('after zooming, coarse passes do not repaint a sharper projected preview', 
   h.workers[0].emit({ type: 'tiles', id: next.id, tiles: [tile(8)] });
   h.flushFrames();
   assert.equal(fresh.draws.length, before + 1);
+});
+
+test('the URL hash follows the view, restores a shared view and clears on reset', () => {
+  const h = harness();
+  h.flush();
+  assert.equal(h.location.hash, '', 'the default view has no hash');
+  h.window.emit('wheel', { clientX: 300, clientY: 200, deltaY: -600, deltaMode: 0 });
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 400, clientY: 300 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 430, clientY: 280 });
+  h.canvas.emit('pointerup', { pointerId: 1 });
+  h.flush();
+  const shared = h.location.hash, view = h.request().view;
+  assert.match(shared, /^#re=-?\d+\.\d+&im=-?\d+\.\d+&zoom=[\d.e+-]+$/);
+  assert.ok(h.replaced.length <= 3, 'replaceState, debounced, never one entry per event');
+
+  // Another visitor opening the link (same window size) lands on the same view.
+  const other = harness({ hash: shared });
+  const restored = other.request().view;
+  assert.ok(Math.abs(restored.logScale - view.logScale) < 1e-8);
+  const shift = BigInt(Math.max(view.bits, restored.bits));
+  const align = (value, bits) => value << (shift - BigInt(bits));
+  const pixel = 1n << (shift - BigInt(Math.ceil(-view.logScale)));
+  assert.ok(abs(align(restored.re, restored.bits) - align(view.re, view.bits)) < pixel / 100n);
+  assert.ok(abs(align(restored.im, restored.bits) - align(view.im, view.bits)) < pixel / 100n);
+
+  // Reset clears the hash at once, without waiting for the debounce.
+  h.elements.get('#reset-view').emit('click');
+  assert.equal(h.location.hash, '');
+
+  // An edited hash (or back/forward) moves the view; an invalid one is ignored.
+  h.location.hash = shared; h.window.emit('hashchange');
+  assert.ok(Math.abs(h.request().view.logScale - view.logScale) < 1e-8);
+  const before = h.request().id;
+  h.location.hash = '#re=abc&im=0&zoom=2'; h.window.emit('hashchange');
+  assert.equal(h.request().id, before);
 });
