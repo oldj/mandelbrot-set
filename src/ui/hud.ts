@@ -1,8 +1,8 @@
 /**
  * The information panel and its controls: the centre coordinates (abbreviated
- * to fit their boxes), the magnification, the full-coordinate dialog, copying
- * the view to the clipboard, and the reset button, which is only shown away
- * from the initial view. main.ts owns the view; the panel reads it through
+ * to fit their boxes), the magnification, the full-coordinate dialog (with
+ * its own copy button), copying the view to the clipboard, and the reset
+ * button, which is only shown away from the initial view. main.ts owns the view; the panel reads it through
  * `current` and is refreshed from each drawn frame.
  */
 import { initialView, isInitialView } from '../math/precision.ts';
@@ -41,12 +41,13 @@ export function createHud({ canvas, measure, current, requestDraw, onReset }: Hu
   const resetButton = document.querySelector<HTMLButtonElement>('#reset-view')!;
   const copyButton = document.querySelector<HTMLButtonElement>('#copy-view')!;
   const copyFeedback = document.querySelector<HTMLElement>('#copy-feedback')!;
+  const copyCoordinate = document.querySelector<HTMLButtonElement>('#copy-coordinate')!;
+  const coordinateFeedback = document.querySelector<HTMLElement>('#coordinate-copy-feedback')!;
 
   let info: ReturnType<typeof viewInfo>;
   let infoView: View | undefined;
   let infoWidth = 0, infoHeight = 0;
   let layoutDirty = true;
-  let copyFeedbackTimer: ReturnType<typeof setTimeout>;
 
   /** Reset is only offered once the view differs from the default one. */
   function updateResetButton(view: View, cssWidth: number, cssHeight: number): void {
@@ -104,31 +105,14 @@ export function createHud({ canvas, measure, current, requestDraw, onReset }: Hu
   closeCoordinate.addEventListener('click', () => coordinateDialog.close());
   coordinateDialog.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
 
-  copyButton.addEventListener('click', async () => {
+  const stopCopyView = copyOnClick(copyButton, copyFeedback, () => {
+    // Snapshot the current view, including all coordinate digits, even before the next paint.
     const shown = current();
-    if (copyButton.disabled || !shown) return;
-    clearTimeout(copyFeedbackTimer);
-    copyButton.disabled = true;
-    copyButton.dataset.state = 'pending';
-    copyFeedback.textContent = 'Copying…';
-    try {
-      // Snapshot the current view, including all coordinate digits, even before the next paint.
-      const text = viewClipboardText(shown.view, initialView(shown.cssWidth, shown.cssHeight).logScale);
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(text);
-      copyButton.dataset.state = 'copied';
-      copyFeedback.textContent = 'Position and zoom copied';
-    } catch {
-      copyButton.dataset.state = 'error';
-      copyFeedback.textContent = 'Couldn’t copy. Try again, or open a coordinate and select it.';
-    } finally {
-      copyButton.disabled = false;
-      copyFeedbackTimer = setTimeout(() => {
-        copyFeedback.textContent = '';
-        copyButton.dataset.state = 'idle';
-      }, copyButton.dataset.state === 'copied' ? 2000 : 4000);
-    }
-  });
+    return shown && viewClipboardText(shown.view, initialView(shown.cssWidth, shown.cssHeight).logScale);
+  }, 'Position and zoom copied', 'Couldn’t copy. Try again, or open a coordinate and select it.');
+  const stopCopyCoordinate = copyOnClick(copyCoordinate, coordinateFeedback, () => coordinateFull.textContent ?? undefined,
+    'Copied', 'Couldn’t copy. Select the digits and copy them instead.');
+  coordinateDialog.addEventListener('close', () => { coordinateFeedback.textContent = ''; copyCoordinate.dataset.state = 'idle'; });
 
   resetButton.addEventListener('click', onReset);
   // Interacting with the information controls must not zoom the fractal underneath.
@@ -138,6 +122,41 @@ export function createHud({ canvas, measure, current, requestDraw, onReset }: Hu
   return {
     update,
     get dialogOpen() { return coordinateDialog.open; },
-    dispose() { clearTimeout(copyFeedbackTimer); },
+    dispose() { stopCopyView(); stopCopyCoordinate(); },
   };
+}
+
+/**
+ * Copy `text()` to the clipboard when `button` is clicked, showing progress on
+ * the button (data-state: pending, copied, error, idle) and in `feedback`, a
+ * live region, until it resets after 2 s (4 s for errors). Returns a function
+ * that cancels a pending reset.
+ */
+function copyOnClick(button: HTMLButtonElement, feedback: HTMLElement, text: () => string | undefined,
+  copied: string, failed: string): () => void {
+  let timer: ReturnType<typeof setTimeout>;
+  button.addEventListener('click', async () => {
+    const value = text();
+    if (button.disabled || value === undefined) return;
+    clearTimeout(timer);
+    button.disabled = true;
+    button.dataset.state = 'pending';
+    feedback.textContent = 'Copying…';
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(value);
+      button.dataset.state = 'copied';
+      feedback.textContent = copied;
+    } catch {
+      button.dataset.state = 'error';
+      feedback.textContent = failed;
+    } finally {
+      button.disabled = false;
+      timer = setTimeout(() => {
+        feedback.textContent = '';
+        button.dataset.state = 'idle';
+      }, button.dataset.state === 'copied' ? 2000 : 4000);
+    }
+  });
+  return () => clearTimeout(timer);
 }

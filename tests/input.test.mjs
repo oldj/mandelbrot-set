@@ -29,7 +29,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     clientWidth = 120;
     open = false;
     showModal() { this.open = true; }
-    close() { this.open = false; }
+    close() { if (this.open) { this.open = false; this.emit('close'); } }
     addEventListener(type, callback) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
       this.listeners.get(type).push(callback);
@@ -61,7 +61,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     emit(data) { this.onmessage({ data }); }
   }
   const canvas = new Canvas(), window = new Target();
-  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#reset-view', '#copy-view', '#copy-feedback', '#coordinate-dialog', '#coordinate-title', '#coordinate-full', '#close-coordinate'].map(id => [id, new Target()])]);
+  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#reset-view', '#copy-view', '#copy-feedback', '#coordinate-dialog', '#coordinate-title', '#coordinate-full', '#close-coordinate', '#copy-coordinate', '#coordinate-copy-feedback'].map(id => [id, new Target()])]);
   canvas.rect = { left: 0, top: 0, right: width, bottom: height, width, height };
   window.devicePixelRatio = dpr;
   const globals = {
@@ -306,6 +306,28 @@ test('abbreviated coordinates open full values while clipboard retains the compl
   await h.elements.get('#copy-view').listeners.get('click')[0]();
   assert.ok(h.clipboardWrites[0].includes(`Center (Re): ${real}\nCenter (Im): ${imaginary}`));
   assert.ok(!h.clipboardWrites[0].includes('…'));
+});
+
+test('the coordinate dialog copies exactly the full value shown, and failures say so', async () => {
+  const h = harness();
+  for (let i = 0; i < 80; i++) h.window.emit('wheel', { clientX: 200, clientY: 200, deltaY: -600, deltaMode: 0 });
+  h.flush(); h.flushFrames();
+  const view = h.request().view;
+  h.elements.get('#centre-imag').emit('click');
+  const button = h.elements.get('#copy-coordinate'), feedback = h.elements.get('#coordinate-copy-feedback');
+  await button.listeners.get('click')[0]();
+  assert.deepEqual(h.clipboardWrites, [formatCoordinate(view.im, view.bits, view.logScale)]);
+  assert.equal(button.dataset.state, 'copied');
+  assert.equal(feedback.textContent, 'Copied');
+  // Closing the dialog clears its feedback for the next coordinate.
+  h.elements.get('#close-coordinate').emit('click');
+  assert.equal(feedback.textContent, '');
+  assert.equal(button.dataset.state, 'idle');
+  const denied = harness({ clipboardWrite: async () => { throw new Error('Permission denied'); } });
+  denied.elements.get('#centre-real').emit('click');
+  await denied.elements.get('#copy-coordinate').listeners.get('click')[0]();
+  assert.equal(denied.elements.get('#copy-coordinate').dataset.state, 'error');
+  assert.match(denied.elements.get('#coordinate-copy-feedback').textContent, /Couldn’t copy/);
 });
 
 test('coordinate labels adapt to available width without changing the view', () => {

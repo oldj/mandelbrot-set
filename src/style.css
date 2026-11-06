@@ -322,32 +322,46 @@ canvas.dragging { cursor: grabbing; }
 }
 .coordinate-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .coordinate-dialog h2 { margin: 0; font-size: 15px; font-weight: 500; }
-.coordinate-dialog button {
-  min-height: 36px;
-  padding: 6px 12px;
+.dialog-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--chip-border);
   border-radius: 10px;
   background: var(--chip);
-  color: var(--text);
-  font: inherit;
+  color: var(--text-soft);
   cursor: pointer;
-  transition: background-color 160ms ease;
+  transition: background-color 160ms ease, color 160ms ease;
 }
-.coordinate-dialog button:hover { background: var(--chip-hover); }
+.dialog-close svg { width: 14px; height: 14px; }
+.dialog-close:hover { background: var(--chip-hover); color: var(--text); }
 .coordinate-dialog :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #coordinate-hint { margin: 10px 0 12px; color: var(--text-muted); }
-.coordinate-dialog-body { max-height: 55dvh; overflow-y: auto; overscroll-behavior: contain; }
-#coordinate-full {
-  margin: 0;
-  padding: 12px;
+/* The digits and their copy button share one box; long values scroll beside the button. */
+.coordinate-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
   border: 1px solid rgb(255 255 255 / 0.07);
   border-radius: 12px;
   background: rgb(0 4 12 / 0.45);
+}
+.coordinate-dialog-body { flex: 1; min-width: 0; max-height: 55dvh; overflow-y: auto; overscroll-behavior: contain; }
+#coordinate-full {
+  margin: 0;
+  padding: 4px 0;
   font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
 }
+.coordinate-box .copy-view { flex: none; }
+.coordinate-copy-feedback { margin: 8px 0 0; color: var(--text-muted); }
+.coordinate-copy-feedback:empty { display: none; }
 
 @media (max-width: 640px) {
   /* Full-width coordinates along the bottom; reset sits above them, still on the right. */
@@ -378,10 +392,10 @@ canvas.dragging { cursor: grabbing; }
 @media (pointer: coarse) {
   .reset-view { min-height: 44px; }
   .copy-view { width: 44px; height: 44px; }
-  .coordinate-dialog button { min-height: 44px; }
+  .dialog-close { width: 44px; height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .coordinate-dialog button { transition: none; }
+  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .dialog-close { transition: none; }
   .github-link:hover, .reset-view:hover, .github-link:active, .reset-view:active, .copy-view:active { transform: none; }
 }
