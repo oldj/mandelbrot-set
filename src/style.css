@@ -29,6 +29,7 @@ canvas {
 canvas.dragging { cursor: grabbing; }
 
 .site-heading,
+.github-link,
 .view-info,
 .reset-view {
   position: fixed;
@@ -45,20 +46,51 @@ canvas.dragging { cursor: grabbing; }
 .site-heading {
   top: max(20px, env(safe-area-inset-top));
   left: max(20px, env(safe-area-inset-left));
-  max-width: calc(100vw - 40px);
+  max-width: calc(100vw - var(--hud-left) - var(--hud-right) - 56px);
   padding: 17px 20px 15px;
   pointer-events: none;
 }
 
 .site-heading h1 {
-  margin: 0 0 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
   font: 500 clamp(18px, 3vw, 21px)/1.2 system-ui, sans-serif;
   letter-spacing: -0.035em;
 }
 
+.reference-link {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: #b2c9df;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+.reference-link svg { width: 15px; height: 15px; }
+.reference-link:hover { color: #eef7ff; background: #b4d0ed18; }
+.reference-link:focus-visible { outline: 2px solid #a7d7ff; outline-offset: 2px; }
+.github-link {
+  top: max(20px, env(safe-area-inset-top));
+  right: var(--hud-right);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  touch-action: manipulation;
+}
+.github-link svg { width: 22px; height: 22px; }
+.github-link:hover { color: #fff; border-color: #a7d7ff66; }
+.github-link:focus-visible { outline: 2px solid #a7d7ff; outline-offset: 3px; }
+@media (pointer: coarse) {
+  .reference-link { width: 44px; height: 44px; }
+}
+
 .site-formula {
-  padding-top: 10px;
-  border-top: 1px solid #c7ddff1c;
   font-size: 16px;
   color: #b2c9df;
 }
@@ -238,9 +270,9 @@ canvas.dragging { cursor: grabbing; }
   .site-heading {
     top: max(12px, env(safe-area-inset-top));
     left: max(12px, env(safe-area-inset-left));
-    max-width: calc(100vw - 24px);
     padding: 14px 16px 12px;
   }
+  .github-link { top: max(12px, env(safe-area-inset-top)); }
 }
 
 @media (pointer: coarse) {

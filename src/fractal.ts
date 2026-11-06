@@ -258,14 +258,17 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   } };
 }
 
-const PALETTE = [[7, 15, 35], [18, 45, 94], [34, 100, 163], [105, 181, 210],
-  [223, 236, 222], [244, 186, 91], [171, 83, 40], [35, 24, 44]];
+// A fixed escape-time period keeps local contrast at large iteration counts.
+// Never normalize by the iteration budget or compress the escape time with log.
+export const COLOR_PERIOD = 64;
+const PALETTE = [[18, 52, 145], [57, 145, 212], [164, 225, 247], [255, 255, 216],
+  [255, 204, 58], [218, 110, 20], [63, 24, 65], [14, 16, 72]];
 
 export function color(value: number, pixels: Uint8ClampedArray, offset: number): void {
   if (value === INTERIOR) {
-    pixels[offset] = 3; pixels[offset + 1] = 5; pixels[offset + 2] = 10;
+    pixels[offset] = 0; pixels[offset + 1] = 0; pixels[offset + 2] = 0;
   } else {
-    const position = Math.log2(1 + Math.max(0, value)) * 2.2;
+    const position = (Math.max(0, value) % COLOR_PERIOD) * PALETTE.length / COLOR_PERIOD;
     const index = Math.floor(position), blend = position - index;
     const from = PALETTE[index % PALETTE.length], to = PALETTE[(index + 1) % PALETTE.length];
     for (let channel = 0; channel < 3; channel++) pixels[offset + channel] = from[channel] + (to[channel] - from[channel]) * blend;
