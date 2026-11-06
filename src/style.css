@@ -4,6 +4,25 @@
   --hud-left: max(20px, env(safe-area-inset-left));
   --hud-right: max(20px, env(safe-area-inset-right));
   --hud-bottom: max(20px, env(safe-area-inset-bottom));
+  /*
+   * Frosted glass. The backdrop is blurred, saturated and dimmed a little, so
+   * light text stays legible even over a nearly white view; a faint tint and
+   * a diagonal sheen sit on top, and a gradient rim catches the light.
+   */
+  --glass-tint: rgb(8 13 24 / 0.4);
+  --glass-sheen: linear-gradient(135deg, rgb(255 255 255 / 0.11), rgb(255 255 255 / 0.03) 45%, rgb(255 255 255 / 0) 70%);
+  --glass-filter: blur(22px) saturate(170%) brightness(0.62);
+  --glass-rim: linear-gradient(150deg, rgb(255 255 255 / 0.38), rgb(255 255 255 / 0.08) 38%, rgb(255 255 255 / 0.04) 62%, rgb(255 255 255 / 0.18));
+  --glass-shadow: 0 12px 32px rgb(0 0 0 / 0.26), 0 2px 6px rgb(0 0 0 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.10);
+  --chip: rgb(255 255 255 / 0.07);
+  --chip-hover: rgb(255 255 255 / 0.14);
+  --chip-border: rgb(255 255 255 / 0.13);
+  --hairline: rgb(255 255 255 / 0.13);
+  --text: #eef3fa;
+  --text-soft: #d0dbe8;
+  --text-muted: #b6c4d6;
+  --accent: #a6e3f0;
+  --focus: #9fd8ff;
 }
 
 html,
@@ -33,13 +52,37 @@ canvas.dragging { cursor: grabbing; }
 .view-info,
 .reset-view {
   box-sizing: border-box;
-  border: 1px solid #c7ddff24;
-  border-radius: 14px;
-  background: linear-gradient(145deg, #172334d9, #080f1de8);
-  color: #e5edf8;
-  box-shadow: 0 8px 32px #02071328, inset 0 1px 0 #ffffff0a;
-  backdrop-filter: blur(14px) saturate(120%);
-  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  border: 0;
+  border-radius: 16px;
+  background: var(--glass-sheen), var(--glass-tint);
+  color: var(--text);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease, color 160ms ease;
+}
+
+/* The rim: a 1px gradient ring, masked so the glass inside stays clear. */
+.site-heading::before,
+.github-link::before,
+.view-info::before,
+.reset-view::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--glass-rim);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+/* Without backdrop blur, keep the panels readable with a denser tint. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --glass-tint: rgb(12 19 33 / 0.9); }
 }
 
 .site-heading,
@@ -50,6 +93,7 @@ canvas.dragging { cursor: grabbing; }
   left: max(20px, env(safe-area-inset-left));
   max-width: calc(100vw - var(--hud-left) - var(--hud-right) - 56px);
   padding: 17px 20px 15px;
+  border-radius: 18px;
   pointer-events: none;
 }
 
@@ -69,13 +113,14 @@ canvas.dragging { cursor: grabbing; }
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  color: #b2c9df;
+  color: var(--text-muted);
   pointer-events: auto;
   touch-action: manipulation;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 .reference-link svg { width: 15px; height: 15px; }
-.reference-link:hover { color: #eef7ff; background: #b4d0ed18; }
-.reference-link:focus-visible { outline: 2px solid #a7d7ff; outline-offset: 2px; }
+.reference-link:hover { color: var(--text); background: var(--chip-hover); }
+.reference-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .github-link {
   top: max(20px, env(safe-area-inset-top));
   right: var(--hud-right);
@@ -83,18 +128,19 @@ canvas.dragging { cursor: grabbing; }
   place-items: center;
   width: 44px;
   height: 44px;
+  border-radius: 14px;
+  color: var(--text-soft);
   touch-action: manipulation;
 }
-.github-link svg { width: 22px; height: 22px; }
-.github-link:hover { color: #fff; border-color: #a7d7ff66; }
-.github-link:focus-visible { outline: 2px solid #a7d7ff; outline-offset: 3px; }
+.github-link svg { width: 22px; height: 22px; filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35)); }
+.github-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 @media (pointer: coarse) {
   .reference-link { width: 44px; height: 44px; }
 }
 
 .site-formula {
   font-size: 16px;
-  color: #b2c9df;
+  color: var(--text-soft);
 }
 
 .site-formula math { font-size: inherit; }
@@ -121,8 +167,8 @@ canvas.dragging { cursor: grabbing; }
   gap: 12px;
   flex: 0 1 564px;
   min-width: 0;
-  padding: 7px 10px 7px 14px;
-  border-radius: 12px;
+  padding: 7px 8px 7px 14px;
+  border-radius: 14px;
   font: 11px/1.6 system-ui, sans-serif;
 }
 
@@ -132,16 +178,18 @@ canvas.dragging { cursor: grabbing; }
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 1px solid #b4d0ed24;
-  border-radius: 7px;
-  background: #b4d0ed09;
-  color: #c9d9ec;
+  border: 1px solid var(--chip-border);
+  border-radius: 9px;
+  background: var(--chip);
+  color: var(--text-soft);
   cursor: pointer;
   touch-action: manipulation;
+  transition: background-color 160ms ease, color 160ms ease, transform 120ms ease;
 }
 .copy-view svg { width: 14px; height: 14px; }
-.copy-view:hover { border-color: #a7d7ff66; color: #eef7ff; }
-.copy-view:focus-visible { outline: 2px solid #91ceff; outline-offset: 3px; }
+.copy-view:hover { background: var(--chip-hover); color: var(--text); }
+.copy-view:active { transform: scale(0.94); }
+.copy-view:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .copy-view:disabled { opacity: 0.6; cursor: wait; }
 .copy-view .copy-check { display: none; }
 .copy-view[data-state="copied"] { color: #a4e8ca; }
@@ -154,11 +202,14 @@ canvas.dragging { cursor: grabbing; }
   box-sizing: border-box;
   width: max-content;
   max-width: min(280px, calc(100vw - 32px));
-  padding: 7px 10px;
-  border: 1px solid #c7ddff24;
-  border-radius: 8px;
-  background: #101d2ef5;
-  color: #e5edf8;
+  padding: 7px 11px;
+  border: 1px solid var(--chip-border);
+  border-radius: 10px;
+  background: var(--glass-sheen), rgb(9 14 26 / 0.62);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
   pointer-events: none;
 }
 .copy-feedback:empty { display: none; }
@@ -171,21 +222,31 @@ canvas.dragging { cursor: grabbing; }
   justify-content: center;
   gap: 6px;
   min-height: 42px;
-  min-width: 70px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  color: #c9d9ec;
-  font: 11px/1.6 system-ui, sans-serif;
+  min-width: 72px;
+  padding: 8px 14px;
+  border-radius: 14px;
+  color: var(--text-soft);
+  font: 500 11px/1.6 system-ui, sans-serif;
   cursor: pointer;
   touch-action: manipulation;
-  transition: border-color 140ms ease, color 140ms ease;
 }
 
 .reset-view[hidden] { display: none; }
 .reset-view svg { width: 13px; height: 13px; flex: none; }
-.reset-view:hover { border-color: #a7d7ff66; color: #eef7ff; }
-.reset-view:active { background: #20394de8; }
-.reset-view:focus-visible { outline: 2px solid #91ceff; outline-offset: 3px; }
+.reset-view:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+/* Glass buttons brighten and lift slightly under the pointer, and press in. */
+@media (hover: hover) {
+  .github-link:hover,
+  .reset-view:hover {
+    background-color: rgb(255 255 255 / 0.08);
+    color: var(--text);
+    box-shadow: 0 16px 36px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.2), inset 0 1px 0 rgb(255 255 255 / 0.16);
+    transform: translateY(-1px);
+  }
+}
+.github-link:active,
+.reset-view:active { transform: translateY(0) scale(0.97); background-color: rgb(255 255 255 / 0.12); }
 .view-info dl {
   display: grid;
   /* The zoom is short and always shown in full; the coordinates abbreviate to fit the rest. */
@@ -194,8 +255,8 @@ canvas.dragging { cursor: grabbing; }
   margin: 0;
 }
 .view-info dl > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.view-info dl > div + div { border-left: 1px solid #c7ddff24; padding-left: 12px; }
-.view-info dt { flex: none; color: #9bacc2; font-size: 10.5px; white-space: nowrap; }
+.view-info dl > div + div { border-left: 1px solid var(--hairline); padding-left: 12px; }
+.view-info dt { flex: none; color: var(--text-muted); font-size: 10.5px; white-space: nowrap; }
 .view-info dd {
   min-width: 0;
   flex: 1;
@@ -203,14 +264,14 @@ canvas.dragging { cursor: grabbing; }
   overflow-x: auto;
   white-space: nowrap;
   scrollbar-width: thin;
-  scrollbar-color: #91b5d44d transparent;
+  scrollbar-color: rgb(255 255 255 / 0.25) transparent;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }
 
-#zoom-level { flex: none; overflow: visible; color: #a4dce8; }
+#zoom-level { flex: none; overflow: visible; color: var(--accent); }
 
 .coordinate-value {
   display: block;
@@ -228,43 +289,55 @@ canvas.dragging { cursor: grabbing; }
   cursor: pointer;
   touch-action: manipulation;
 }
-.coordinate-value:hover { color: #b9e5ff; text-decoration: underline; text-underline-offset: 3px; }
-.coordinate-value:focus-visible { outline: 2px solid #91ceff; outline-offset: -2px; }
+.coordinate-value:hover { color: #c4ecff; text-decoration: underline; text-decoration-color: rgb(196 236 255 / 0.5); text-underline-offset: 3px; }
+.coordinate-value:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 .coordinate-dialog {
   box-sizing: border-box;
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
   padding: 20px;
-  border: 1px solid #c7ddff30;
-  border-radius: 14px;
-  background: #101b2b;
-  color: #e5edf8;
-  box-shadow: 0 16px 64px #00000066;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: 18px;
+  background: var(--glass-sheen), rgb(10 16 29 / 0.62);
+  color: var(--text);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.12);
+  -webkit-backdrop-filter: blur(28px) saturate(170%) brightness(0.7);
+  backdrop-filter: blur(28px) saturate(170%) brightness(0.7);
   font: 12px/1.6 system-ui, sans-serif;
 }
-.coordinate-dialog::backdrop { background: #02071399; }
+.coordinate-dialog::backdrop {
+  background: rgb(2 7 19 / 0.4);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .coordinate-dialog { background: #101b2b; }
+  .copy-feedback { background: #101d2ef5; }
+}
 .coordinate-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .coordinate-dialog h2 { margin: 0; font-size: 15px; font-weight: 500; }
 .coordinate-dialog button {
   min-height: 36px;
   padding: 6px 12px;
-  border: 1px solid #b4d0ed30;
-  border-radius: 7px;
-  background: #b4d0ed0d;
-  color: #e5edf8;
+  border: 1px solid var(--chip-border);
+  border-radius: 10px;
+  background: var(--chip);
+  color: var(--text);
   font: inherit;
   cursor: pointer;
+  transition: background-color 160ms ease;
 }
-.coordinate-dialog button:hover { background: #b4d0ed20; }
-.coordinate-dialog :focus-visible { outline: 2px solid #91ceff; outline-offset: 2px; }
-#coordinate-hint { margin: 10px 0 12px; color: #9bacc2; }
+.coordinate-dialog button:hover { background: var(--chip-hover); }
+.coordinate-dialog :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#coordinate-hint { margin: 10px 0 12px; color: var(--text-muted); }
 .coordinate-dialog-body { max-height: 55dvh; overflow-y: auto; overscroll-behavior: contain; }
 #coordinate-full {
   margin: 0;
   padding: 12px;
-  border-radius: 8px;
-  background: #060f1b;
+  border: 1px solid rgb(255 255 255 / 0.07);
+  border-radius: 12px;
+  background: rgb(0 4 12 / 0.45);
   font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -304,5 +377,6 @@ canvas.dragging { cursor: grabbing; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reset-view { transition: none; }
+  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .coordinate-dialog button { transition: none; }
+  .github-link:hover, .reset-view:hover, .github-link:active, .reset-view:active, .copy-view:active { transform: none; }
 }
