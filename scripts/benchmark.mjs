@@ -2,8 +2,9 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const source = resolve(process.argv[2] || 'src');
-const { createSampler, iterationBudget, color } = await import(pathToFileURL(`${source}/fractal.ts`));
-const { initialView, ensurePrecision, toFixed } = await import(pathToFileURL(`${source}/precision.ts`));
+const { createSampler, iterationBudget } = await import(pathToFileURL(`${source}/fractal/index.ts`));
+const { color } = await import(pathToFileURL(`${source}/render/palette.ts`));
+const { initialView, ensurePrecision, toFixed } = await import(pathToFileURL(`${source}/math/precision.ts`));
 const width = 160, height = 100, cssWidth = 1280, cssHeight = 800;
 const xs = new Float64Array(width), values = new Float64Array(width), distances = new Float64Array(width);
 const decimal = (text, bits) => {

@@ -1,7 +1,15 @@
-import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, referenceFromOrbit, shadedWord } from './fractal.ts';
-import type { ReferenceCache, ReferenceEntry } from './fractal';
-import type { OrbitData, ReferenceSpec } from './reference';
-import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
+/**
+ * A render worker. It owns fixed 32-pixel tiles of each request and samples
+ * them in passes of 8, 4, 2 and 1 pixels, reusing every coarser sample and
+ * shading each pixel by its escape count and distance estimate. Deep views
+ * share one reference orbit: worker 0 computes it, the main thread forwards it.
+ * Work yields every ~8 ms, so newer requests cancel older ones promptly.
+ */
+import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, referenceFromOrbit } from '../fractal/index.ts';
+import { shadedWord } from './palette.ts';
+import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
+import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
+import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
 
 let generation = 0;
 const referenceCache: ReferenceCache = {};

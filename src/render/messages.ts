@@ -1,5 +1,10 @@
-import type { View } from './precision';
-import type { OrbitData, ReferenceSpec } from './reference';
+/**
+ * The protocol between the main thread and the render workers: render
+ * requests (with the regions to compute and the shared reference plan),
+ * reference orbits passed around, finished tiles and pass progress.
+ */
+import type { View } from '../math/precision.ts';
+import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
 
 export interface RenderRegion { x: number; y: number; width: number; height: number }
 

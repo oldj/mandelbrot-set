@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatViewHash, formatZoomText, parseDecimal, parseViewHash, parseZoomText } from '../src/url-state.ts';
-import { ensurePrecision, initialView, toFixed, transformView } from '../src/precision.ts';
+import { formatViewHash, formatZoomText, parseDecimal, parseViewHash, parseZoomText } from '../src/ui/url-state.ts';
+import { ensurePrecision, initialView, toFixed, transformView } from '../src/math/precision.ts';
 
 const abs = n => n < 0n ? -n : n;
 

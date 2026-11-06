@@ -1,40 +1,32 @@
-import { initialView, isInitialView, transformView, viewOffset } from './precision';
-import type { Point, View } from './precision';
-import { adaptBudget, chooseBudget, rememberUse } from './budget';
-import type { BudgetMemory } from './budget';
-import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
-import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
-import { missingRegions, panRaster, shiftQuality } from './raster-cache';
-import { TileStage } from './tile-stage';
-import { formatViewHash, parseViewHash } from './url-state';
-import { renderWorkerCount, workerCapacity } from './worker-policy';
-import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './reference';
-import type { OrbitData, ReferenceSpec } from './reference';
-import type { ReferencePlan, RenderMessage, RenderRequest } from './types';
+/**
+ * The application: the canvas and its views, input (wheel, pointer and touch
+ * gestures, Home, the URL hash), and render scheduling. Each render gets a
+ * fresh off-screen surface, previewed by projecting the previous one; workers
+ * (render/worker.ts) fill it with tiles in passes of 8, 4, 2 and 1 pixels,
+ * staged and uploaded once per frame (render/tile-stage.ts). The info panel
+ * lives in ui/hud.ts.
+ */
+import { initialView, transformView, viewOffset } from './math/precision.ts';
+import type { Point, View } from './math/precision.ts';
+import { adaptBudget, chooseBudget, rememberUse } from './render/budget.ts';
+import type { BudgetMemory } from './render/budget.ts';
+import { gesture, wheelAnchor, wheelLogFactor } from './ui/gestures.ts';
+import { createHud } from './ui/hud.ts';
+import { missingRegions, panRaster, shiftQuality } from './render/raster-cache.ts';
+import { TileStage } from './render/tile-stage.ts';
+import { formatViewHash, parseViewHash } from './ui/url-state.ts';
+import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
+import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
+import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
+import type { ReferencePlan, RenderMessage, RenderRequest } from './render/messages.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
-const infoPanel = document.querySelector<HTMLElement>('#view-info')!;
-const realLabel = document.querySelector<HTMLButtonElement>('#centre-real')!;
-const imaginaryLabel = document.querySelector<HTMLButtonElement>('#centre-imag')!;
-const coordinateDialog = document.querySelector<HTMLDialogElement>('#coordinate-dialog')!;
-const coordinateTitle = document.querySelector<HTMLElement>('#coordinate-title')!;
-const coordinateFull = document.querySelector<HTMLElement>('#coordinate-full')!;
-const closeCoordinate = document.querySelector<HTMLButtonElement>('#close-coordinate')!;
-const zoomLabel = document.querySelector<HTMLElement>('#zoom-level')!;
-const resetButton = document.querySelector<HTMLButtonElement>('#reset-view')!;
-const copyButton = document.querySelector<HTMLButtonElement>('#copy-view')!;
-const copyFeedback = document.querySelector<HTMLElement>('#copy-feedback')!;
-let copyFeedbackTimer: ReturnType<typeof setTimeout>;
 const context = canvas.getContext('2d', { alpha: false });
 if (!context) throw new Error('This browser can’t create a 2D canvas context.');
 const ctx = context;
 canvas.tabIndex = 0;
 let cssWidth = 1, cssHeight = 1;
 let view: View;
-let infoView: View | undefined;
-let infoWidth = 0, infoHeight = 0;
-let info: ReturnType<typeof viewInfo>;
-let coordinateLayoutDirty = true;
 let frame = 0;
 let generation = 0;
 let lastRender = -Infinity;
@@ -136,44 +128,12 @@ function projectedQuality(source: Surface | undefined, completed: number, width:
   return result;
 }
 
-/** Reset is only offered once the view differs from the default one. */
-function updateResetButton(): void {
-  const hidden = isInitialView(view, cssWidth, cssHeight);
-  if (resetButton.hidden === hidden) return;
-  // Keep keyboard focus somewhere useful when the focused button disappears.
-  if (hidden && document.activeElement === resetButton) canvas.focus({ preventScroll: true });
-  resetButton.hidden = hidden;
-}
-
 function draw(): void {
   frame = 0;
   // The label observer can fire before the canvas has a size (e.g. a hidden page).
   if (!view) return;
   flushTiles();
-  if (infoView !== view || infoWidth !== cssWidth || infoHeight !== cssHeight) {
-    info = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
-    zoomLabel.textContent = info.zoom;
-    infoView = view; infoWidth = cssWidth; infoHeight = cssHeight;
-    coordinateLayoutDirty = true;
-    updateResetButton();
-  }
-  if (coordinateLayoutDirty) {
-    for (const [label, full] of [[realLabel, info.real], [imaginaryLabel, info.imaginary]] as const) {
-      const style = getComputedStyle(label);
-      // The font shorthand can be empty when font-variant-numeric is set.
-      ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-      const spacing = parseFloat(style.letterSpacing) || 0;
-      const available = Math.max(0, label.clientWidth - 1);
-      const characterWidth = ctx.measureText('0').width + spacing;
-      let budget = Math.max(5, Math.min(23, Math.floor(available / Math.max(1, characterWidth))));
-      let compact = compactCoordinate(full, budget);
-      while (budget > 5 && ctx.measureText(compact).width + spacing * (compact.length - 1) > available) {
-        compact = compactCoordinate(full, --budget);
-      }
-      label.textContent = compact;
-    }
-    coordinateLayoutDirty = false;
-  }
+  hud.update(view, cssWidth, cssHeight);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#050914';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -195,12 +155,10 @@ function scheduleDraw(): void {
   if (!frame) frame = requestAnimationFrame(draw);
 }
 
-const coordinateObserver = new ResizeObserver(() => {
-  coordinateLayoutDirty = true;
-  scheduleDraw();
+const hud = createHud({
+  canvas, measure: ctx, requestDraw: scheduleDraw, onReset: () => resetView(),
+  current: () => view && { view, cssWidth, cssHeight },
 });
-coordinateObserver.observe(realLabel);
-coordinateObserver.observe(imaginaryLabel);
 
 function startRender(): void {
   clearTimeout(renderTimer);
@@ -306,7 +264,7 @@ function changed(): void {
 }
 
 function createWorker(): void {
-  const worker = new Worker(new URL('./mandelbrot.worker.ts', import.meta.url), { type: 'module' });
+  const worker = new Worker(new URL('./render/worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }: MessageEvent<RenderMessage>) => {
     if (data.type === 'reference') {
       // Still useful after newer generations when they reuse the same reference.
@@ -434,48 +392,8 @@ window.addEventListener('hashchange', () => {
   startRender();
 });
 
-resetButton.addEventListener('click', resetView);
-function showCoordinate(part: 'real' | 'imaginary'): void {
-  const current = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
-  coordinateTitle.textContent = part === 'real' ? 'Center · real part (Re)' : 'Center · imaginary part (Im)';
-  coordinateFull.textContent = current[part];
-  if (!coordinateDialog.open) coordinateDialog.showModal();
-}
-realLabel.addEventListener('click', () => showCoordinate('real'));
-imaginaryLabel.addEventListener('click', () => showCoordinate('imaginary'));
-closeCoordinate.addEventListener('click', () => coordinateDialog.close());
-coordinateDialog.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
-
-copyButton.addEventListener('click', async () => {
-  if (copyButton.disabled) return;
-  clearTimeout(copyFeedbackTimer);
-  copyButton.disabled = true;
-  copyButton.dataset.state = 'pending';
-  copyFeedback.textContent = 'Copying…';
-  try {
-    // Snapshot the current view, including all coordinate digits, even before the next paint.
-    const text = viewClipboardText(view, initialView(cssWidth, cssHeight).logScale);
-    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-    await navigator.clipboard.writeText(text);
-    copyButton.dataset.state = 'copied';
-    copyFeedback.textContent = 'Position and zoom copied';
-  } catch {
-    copyButton.dataset.state = 'error';
-    copyFeedback.textContent = 'Couldn’t copy. Try again, or open a coordinate and select it.';
-  } finally {
-    copyButton.disabled = false;
-    copyFeedbackTimer = setTimeout(() => {
-      copyFeedback.textContent = '';
-      copyButton.dataset.state = 'idle';
-    }, copyButton.dataset.state === 'copied' ? 2000 : 4000);
-  }
-});
-// Interacting with the information controls must not zoom the fractal underneath.
-infoPanel.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
-resetButton.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
-
 window.addEventListener('keydown', event => {
-  if (coordinateDialog.open) return;
+  if (hud.dialogOpen) return;
   if (event.key !== 'Home') return;
   event.preventDefault();
   resetView();
@@ -506,7 +424,7 @@ function watchPixelRatio(): void {
 watchPixelRatio();
 window.addEventListener('pagehide', () => {
   clearTimeout(renderTimer);
-  clearTimeout(copyFeedbackTimer);
+  hud.dispose();
   writeHash();
   cancelAnimationFrame(frame);
   workers.forEach(worker => worker.terminate());

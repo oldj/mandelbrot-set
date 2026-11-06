@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TileStage } from '../src/tile-stage.ts';
+import { TileStage } from '../src/render/tile-stage.ts';
 
 function tile(x, y, width, height, step, value, clip = {}) {
   const pixels = new Uint8ClampedArray(width * height * 4);

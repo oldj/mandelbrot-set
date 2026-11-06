@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { build } from 'esbuild';
-import { scaledFixed, viewOffset } from '../src/precision.ts';
-import { formatCoordinate } from '../src/view-info.ts';
+import { scaledFixed, viewOffset } from '../src/math/precision.ts';
+import { formatCoordinate } from '../src/ui/view-info.ts';
 
 // Run the actual browser entry point with deterministic input/worker transports.
 // This checks event wiring (including capture loss) without requiring a touch device.

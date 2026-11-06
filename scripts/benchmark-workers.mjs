@@ -1,7 +1,7 @@
 // Measures the actual progressive worker pipeline, including message transfers.
 import { Worker } from 'node:worker_threads';
-import { ensurePrecision, initialView } from '../src/precision.ts';
-import { iterationBudget } from '../src/fractal.ts';
+import { ensurePrecision, initialView } from '../src/math/precision.ts';
+import { iterationBudget } from '../src/fractal/index.ts';
 const cssWidth = 1280, cssHeight = 800, width = 384, height = 240;
 const view = ensurePrecision({ ...initialView(cssWidth, cssHeight),
   logScale: initialView(cssWidth, cssHeight).logScale - Math.log2(1.5e47) });

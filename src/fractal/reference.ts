@@ -1,7 +1,13 @@
-import { fromFixed, logMagnitude } from './extended.ts';
-import type { Extended } from './extended.ts';
-import { fixedToNumber } from './precision.ts';
-import type { View } from './precision.ts';
+/**
+ * Planning reference orbits on the main thread and in workers: which views
+ * need one, where a new one goes (the view centre, padded so small pans and
+ * zoom-outs can reuse it), and whether an existing one still serves a view.
+ * Computing the orbit itself is in ./orbit.ts.
+ */
+import { fromFixed, logMagnitude } from '../math/extended.ts';
+import type { Extended } from '../math/extended.ts';
+import { fixedToNumber } from '../math/precision.ts';
+import type { View } from '../math/precision.ts';
 
 /** Views at or below this scale use a perturbation reference instead of plain doubles. */
 export const DEEP_LOG_SCALE = -38;

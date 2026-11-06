@@ -1,3 +1,10 @@
+/**
+ * Views of the complex plane: the centre in BigInt binary fixed point, with
+ * precision growing with depth, and the scale as a log2, so neither ever
+ * underflows. Coordinates on screen are CSS pixels from the canvas centre,
+ * with y downwards.
+ */
+
 /** Binary fixed point for positions; the scale stays logarithmic, never underflows. */
 export interface View {
   re: bigint;
@@ -21,11 +28,13 @@ export function toFixed(value: number, bits: number, exponent = 0): bigint {
   return raw >> 63n ? -result : result;
 }
 
+/** value * 2^logScale (a CSS offset in complex units) in fixed point with `bits` fractional bits. */
 export function scaledFixed(value: number, logScale: number, bits: number): bigint {
   const exponent = Math.floor(logScale);
   return toFixed(value * 2 ** (logScale - exponent), bits, exponent);
 }
 
+/** A fixed-point value as a double, divided by 2^logScale (so offsets come back in CSS pixels). */
 export function fixedToNumber(value: bigint, bits: number, logScale = 0): number {
   if (value === 0n) return 0;
   const negative = value < 0n;
@@ -36,6 +45,7 @@ export function fixedToNumber(value: bigint, bits: number, logScale = 0): number
   return (negative ? -1 : 1) * (mantissa / 2 ** normalizer) * 2 ** (shift - bits - logScale + normalizer);
 }
 
+/** The same view with enough fractional bits for its scale (never fewer than it had). */
 export function ensurePrecision(view: View, logScale = view.logScale): View {
   // 128 guard bits beyond one CSS pixel; never discard previous coordinate digits.
   const bits = Math.max(view.bits, 128, Math.ceil((-logScale + 128) / 64) * 64);
@@ -43,6 +53,7 @@ export function ensurePrecision(view: View, logScale = view.logScale): View {
   return { ...view, re: view.re << shift, im: view.im << shift, bits };
 }
 
+/** The full-set view for a window of this CSS size. */
 export function initialView(width: number, height: number): View {
   return { re: -(3n << 192n) / 5n, im: 0n, bits: 192,
     logScale: Math.log2(Math.max(3.4 / width, 2.7 / height)) };
@@ -61,6 +72,7 @@ export function transformView(view: View, oldAnchor: Point, newAnchor: Point, lo
   return next;
 }
 
+/** Where `from`'s centre lies in `to`, in CSS pixels (y downwards). */
 export function viewOffset(from: View, to: View): Point {
   const bits = Math.max(from.bits, to.bits);
   const re = (from.re << BigInt(bits - from.bits)) - (to.re << BigInt(bits - to.bits));

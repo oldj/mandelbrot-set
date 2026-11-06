@@ -1,3 +1,8 @@
+/**
+ * How many render workers to run: up to one fewer than the logical cores (at
+ * most 8), fewer for small regions, and fewer when long reference orbits would
+ * multiply memory across workers.
+ */
 /** Leave a logical core available for input, compositing and the rest of the page. */
 export function workerCapacity(hardwareConcurrency: number | undefined): number {
   const cores = hardwareConcurrency && Number.isFinite(hardwareConcurrency) ? Math.floor(hardwareConcurrency) : 4;

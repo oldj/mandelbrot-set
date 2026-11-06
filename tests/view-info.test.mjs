@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compactCoordinate, formatCoordinate, formatZoom, viewClipboardText } from '../src/view-info.ts';
-import { ensurePrecision, scaledFixed, toFixed } from '../src/precision.ts';
+import { compactCoordinate, formatCoordinate, formatZoom, viewClipboardText } from '../src/ui/view-info.ts';
+import { ensurePrecision, scaledFixed, toFixed } from '../src/math/precision.ts';
 
 test('coordinates round correctly without negative zero', () => {
   assert.equal(formatCoordinate(toFixed(-0.6, 192), 192, -8), '-0.60000000');

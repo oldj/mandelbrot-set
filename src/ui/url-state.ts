@@ -1,5 +1,6 @@
-import { ensurePrecision, isInitialView } from './precision.ts';
-import type { View } from './precision.ts';
+/** The view as a shareable URL hash, and back (see formatViewHash). */
+import { ensurePrecision, isInitialView } from '../math/precision.ts';
+import type { View } from '../math/precision.ts';
 import { formatCoordinate } from './view-info.ts';
 
 /**

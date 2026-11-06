@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ensurePrecision, fixedToNumber, initialView, isInitialView, scaledFixed, toFixed, transformView, viewOffset } from '../src/precision.ts';
-import { gesture, wheelAnchor, wheelLogFactor } from '../src/gestures.ts';
-import { add, extended, linear, logMagnitude, perturbStep, ZERO } from '../src/extended.ts';
+import { ensurePrecision, fixedToNumber, initialView, isInitialView, scaledFixed, toFixed, transformView, viewOffset } from '../src/math/precision.ts';
+import { gesture, wheelAnchor, wheelLogFactor } from '../src/ui/gestures.ts';
+import { add, extended, linear, logMagnitude, perturbStep, ZERO, fromFixed } from '../src/math/extended.ts';
 
 const abs = n => n < 0n ? -n : n;
 function point(view, anchor, bits = view.bits) {
@@ -95,7 +95,6 @@ test('the default view is recognised exactly, even at higher stored precision', 
   assert.ok(!isInitialView(view, 800, 700), 'a window with another fitting scale has a different default');
 });
 
-import { fromFixed } from '../src/extended.ts';
 
 test('fixed-point conversion matches the exact bit-length algorithm at every magnitude', () => {
   const reference = (re, im, bits) => {

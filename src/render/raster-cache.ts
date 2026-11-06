@@ -1,6 +1,12 @@
-import { transformView, viewOffset } from './precision.ts';
-import type { View } from './precision';
-import type { RenderRegion } from './types';
+/**
+ * Reusing rendered pixels. A quality map records, per physical pixel, the
+ * sample spacing it was rendered at (1 = final, 255 = nothing yet); pans
+ * shift pixels and quality together, and only regions still missing or
+ * unfinished are computed again. Late coarse tiles never replace finer pixels.
+ */
+import { transformView, viewOffset } from '../math/precision.ts';
+import type { View } from '../math/precision.ts';
+import type { RenderRegion } from './messages.ts';
 
 /** Keep the sampling grid stable; the exact interaction view retains subpixel motion. */
 export function panRaster(from: View, to: View, width: number, height: number, cssWidth: number, cssHeight: number) {

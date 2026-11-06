@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSampler, directDouble, directFixed, iterationBudget, lastDistance } from '../src/fractal.ts';
-import { ensurePrecision, scaledFixed, toFixed, transformView } from '../src/precision.ts';
+import { createSampler, directDouble, directFixed, iterationBudget, lastDistance, directRow, INTERIOR } from '../src/fractal/index.ts';
+import { ensurePrecision, scaledFixed, toFixed, transformView } from '../src/math/precision.ts';
 
 const noop = async () => {};
 function viewAt(re, im, logScale) {
@@ -117,7 +117,6 @@ test('zooming far into an off-centre point rebuilds a reference even when precis
   }
 });
 
-import { directRow, INTERIOR } from '../src/fractal.ts';
 
 /** Nucleus of the period-p component near c, by Newton's method in fixed point. */
 function nucleus(re, im, period, bits) {
@@ -236,8 +235,8 @@ test('slowly settling interiors are proved by their attracting cycle, soundly, n
   // A period-844 component near a period-211 minibrot at 4.17e13: each lap
   // brings orbits only ~12% closer to the cycle, so close returns take
   // 35 000-140 000 iterations. Newton on f^P finds the cycle point first.
-  const { parseViewHash } = await import('../src/url-state.ts');
-  const { initialView } = await import('../src/precision.ts');
+  const { parseViewHash } = await import('../src/ui/url-state.ts');
+  const { initialView } = await import('../src/math/precision.ts');
   const view = parseViewHash('#re=-0.73088326955313741591&im=0.24781738096196057252&zoom=4.171992716e13', initialView(1280, 800).logScale);
   const limit = 20000, sampler = await createSampler(view, 1280, 800, limit, noop);
   for (const [x, y] of [[-360, -216], [-552, -312], [-632, -392], [-88, -40]]) {
@@ -259,8 +258,8 @@ test('slowly settling interiors are proved by their attracting cycle, soundly, n
 test('interior proofs seeded by a neighbour\'s cycle do not depend on the order pixels are sampled in', async () => {
   // Each proved pixel hands its cycle point to the next; a proof from any start is valid, and a failed
   // one falls back to iterating, so every result must be identical forwards and backwards.
-  const { parseViewHash } = await import('../src/url-state.ts');
-  const { initialView } = await import('../src/precision.ts');
+  const { parseViewHash } = await import('../src/ui/url-state.ts');
+  const { initialView } = await import('../src/math/precision.ts');
   const view = parseViewHash('#re=-0.73088326955313741591&im=0.24781738096196057252&zoom=4.171992716e13', initialView(1280, 800).logScale);
   const xs = Array.from({ length: 64 }, (_, i) => -630 + i * 19.9);
   const run = async order => {

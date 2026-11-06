@@ -1,4 +1,5 @@
-import type { View } from './precision';
+/** Formatting a view for people: coordinates to sub-pixel precision, abbreviated to fit, and the magnification. */
+import type { View } from '../math/precision.ts';
 
 /** Presentation only: keep the beginning and the changing tail, never alter the source. */
 export function compactCoordinate(value: string, maxCharacters = 23): string {
@@ -28,6 +29,7 @@ export function formatZoom(logZoom: number): string {
   return `${mantissa}×10^${exponent}`;
 }
 
+/** The centre and magnification as shown in the info panel (magnification relative to the window's initial view). */
 export function viewInfo(view: View, initialLogScale: number): { real: string; imaginary: string; zoom: string } {
   return {
     real: formatCoordinate(view.re, view.bits, view.logScale),
@@ -36,6 +38,7 @@ export function viewInfo(view: View, initialLogScale: number): { real: string; i
   };
 }
 
+/** The text the copy button puts on the clipboard. */
 export function viewClipboardText(view: View, initialLogScale: number): string {
   const info = viewInfo(view, initialLogScale);
   return `Mandelbrot set\nCenter (Re): ${info.real}\nCenter (Im): ${info.imaginary}\nZoom: ${info.zoom}`;

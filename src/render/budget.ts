@@ -1,4 +1,9 @@
-import { iterationBudget } from './fractal.ts';
+/**
+ * Adapting the iteration budget to what a region actually needs: raised when
+ * too many coarse samples run out of iterations, remembered while zooming
+ * nearby, and forgotten after zooming far out.
+ */
+import { iterationBudget } from '../fractal/index.ts';
 
 /** The most a region may raise its budget to: 64x the depth formula, within [2^16, 2^20]. */
 export function maxIterations(logScale: number): number {

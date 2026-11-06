@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { color, colorWord, createSampler, INTERIOR, iterationBudget, lapsOf, LAPS_PER_E_FOLD, lastDistance, shadedWord } from '../src/fractal.ts';
-import { parseViewHash } from '../src/url-state.ts';
-import { ensurePrecision, initialView } from '../src/precision.ts';
+import { createSampler, INTERIOR, iterationBudget, lastDistance } from '../src/fractal/index.ts';
+import { color, colorWord, lapsOf, LAPS_PER_E_FOLD, shadedWord } from '../src/render/palette.ts';
+import { parseViewHash } from '../src/ui/url-state.ts';
+import { ensurePrecision, initialView } from '../src/math/precision.ts';
 
 function rgb(value) {
   const pixel = new Uint8ClampedArray(4);

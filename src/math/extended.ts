@@ -1,3 +1,9 @@
+/**
+ * Complex numbers as a double mantissa pair with a separate integer binary
+ * exponent ("floatexp"), for deltas and BLA coefficients below 2^-1022 or
+ * above 2^1023, and log2 helpers for bounds that would under- or overflow.
+ */
+
 /** Complex floating point with an independent binary exponent. */
 export interface Extended { re: number; im: number; exp: number }
 export const ZERO: Extended = { re: 0, im: 0, exp: 0 };
@@ -71,4 +77,11 @@ export function fromFixed(re: bigint, im: bigint, bits: number): Extended {
 export function logDifference(a: number, b: number): number {
   if (b >= a) return -Infinity;
   return a + Math.log2(1 - 2 ** (b - a)) - 1e-12;
+}
+
+/** log2(2^a + 2^b) without overflow or underflow. */
+export function logAdd(a: number, b: number): number {
+  if (a === -Infinity) return b;
+  if (b === -Infinity) return a;
+  return Math.max(a, b) + Math.log2(1 + 2 ** -Math.abs(a - b));
 }

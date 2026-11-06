@@ -1,5 +1,10 @@
+/**
+ * The CPU staging buffer between worker tiles and the canvas: tiles of any
+ * pass are painted here as they arrive (coarse samples centred on their
+ * pixels), and the touched rectangle is uploaded once per animation frame.
+ */
 import { claimTile } from './raster-cache.ts';
-import type { RenderRegion, TileData } from './types';
+import type { RenderRegion, TileData } from './messages.ts';
 
 /**
  * CPU staging for finished worker tiles. Every canvas upload has a large fixed

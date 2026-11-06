@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimTile, missingRegions, panRaster, shiftQuality } from '../src/raster-cache.ts';
-import { ensurePrecision, initialView, toFixed, transformView, viewOffset } from '../src/precision.ts';
-import { createSampler } from '../src/fractal.ts';
+import { claimTile, missingRegions, panRaster, shiftQuality } from '../src/render/raster-cache.ts';
+import { ensurePrecision, initialView, toFixed, transformView, viewOffset } from '../src/math/precision.ts';
+import { createSampler } from '../src/fractal/index.ts';
 
 function coverage(regions, width, height) {
   const result = new Uint8Array(width * height);

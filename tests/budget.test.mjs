@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adaptBudget, chooseBudget, maxIterations, rememberUse } from '../src/budget.ts';
-import { iterationBudget } from '../src/fractal.ts';
+import { adaptBudget, chooseBudget, maxIterations, rememberUse } from '../src/render/budget.ts';
+import { iterationBudget } from '../src/fractal/index.ts';
 
 test('a view whose coarse samples run out of iterations raises its budget', () => {
   const formula = iterationBudget(-60);

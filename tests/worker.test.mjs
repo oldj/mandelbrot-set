@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { initialView, ensurePrecision, toFixed } from '../src/precision.ts';
-import { color, colorWord, directDouble, iterationBudget, lastDistance, shadedWord } from '../src/fractal.ts';
-import { missingRegions, panRaster, shiftQuality } from '../src/raster-cache.ts';
-import { transformView } from '../src/precision.ts';
+import { initialView, ensurePrecision, toFixed, transformView } from '../src/math/precision.ts';
+import { directDouble, iterationBudget, lastDistance } from '../src/fractal/index.ts';
+import { color, colorWord, shadedWord } from '../src/render/palette.ts';
+import { missingRegions, panRaster, shiftQuality } from '../src/render/raster-cache.ts';
+import { referenceSpec } from '../src/fractal/reference.ts';
 
 function startWorker(t) {
   const worker = new Worker(new URL('./fixtures/worker-host.mjs', import.meta.url));
@@ -115,7 +116,6 @@ test('partial worker passes cover only exposed pixels and reconstruct a full fre
   assert.ok(exposed < width * height / 5);
 });
 
-import { referenceSpec } from '../src/reference.ts';
 
 function deepRequest(id, extra = {}) {
   const view = ensurePrecision({ ...initialView(40, 30), logScale: -1200 });
@@ -171,7 +171,7 @@ test('reused coarse samples leave a deep render identical to sampling every pixe
   const worker = startWorker(t);
   const request = deepRequest(1, { width: 37, height: 29, cssWidth: 37, cssHeight: 29 });
   const tiles = await collect(worker, request);
-  const { createSampler } = await import('../src/fractal.ts');
+  const { createSampler } = await import('../src/fractal/index.ts');
   const sampler = await createSampler(request.view, 37, 29, request.iterations, async () => {});
   for (const tile of tiles.filter(tile => tile.step === 1)) {
     for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
@@ -202,7 +202,7 @@ test('outlines use each pixel\'s distance estimate in physical pixels, the same 
   const request = { id: 1, view, width, height, cssWidth, cssHeight, iterations: iterationBudget(view.logScale), workerIndex: 0, workerCount: 2 };
   const [first, second] = [startWorker(t), startWorker(t)];
   const tiles = (await Promise.all([collect(first, request), collect(second, { ...request, workerIndex: 1 })])).flat();
-  const { createSampler } = await import('../src/fractal.ts');
+  const { createSampler } = await import('../src/fractal/index.ts');
   const sampler = await createSampler(view, cssWidth, cssHeight, request.iterations, async () => {});
   let shaded = 0, checked = 0;
   for (const tile of tiles.filter(tile => tile.step === 1)) {

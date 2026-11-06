@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderWorkerCount, workerCapacity } from '../src/worker-policy.ts';
+import { renderWorkerCount, workerCapacity } from '../src/render/worker-policy.ts';
 
 test('worker capacity reserves a core and caps concurrency on larger devices', () => {
   for (const [cores, expected] of [[1, 1], [2, 1], [4, 3], [8, 7], [10, 8], [64, 8], [undefined, 3]]) {
