@@ -1,4 +1,4 @@
-import { colorWord, computeOrbit, createSampler, EXTENDED_LOG_SCALE, referenceFromOrbit } from './fractal.ts';
+import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, referenceFromOrbit, shadedWord } from './fractal.ts';
 import type { ReferenceCache, ReferenceEntry } from './fractal';
 import type { OrbitData, ReferenceSpec } from './reference';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
@@ -132,7 +132,11 @@ async function render(request: RenderRequest): Promise<void> {
     tileOffset += tilesX * tilesY;
   }
   const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
-  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), targets = new Int32Array(TILE_SIZE);
+  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
+  const targets = new Int32Array(TILE_SIZE);
+  // Distance estimates come in CSS pixels; outlines are measured in physical
+  // ones, the same in every pass, so coarse previews match the final image.
+  const physical = width / cssWidth;
   for (const step of [8, 4, 2, 1]) {
     let samples = 0;
     const unresolvedBefore = sampler?.stats.unresolved ?? 0;
@@ -154,9 +158,9 @@ async function render(request: RenderRequest): Promise<void> {
           for (let col = 0; col < columns; col += 2) words[row * columns + col] = previous[(row >> 1) * previousColumns + (col >> 1)];
         }
         if (count) {
-          if (sampler!.row) sampler!.row(xs, count, y, values);
-          else for (let k = 0; k < count; k++) values[k] = sampler!.sample(xs[k], y);
-          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = colorWord(values[k]);
+          if (sampler!.row) sampler!.row(xs, count, y, values, distances);
+          else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); }
+          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = shadedWord(values[k], distances[k] * physical);
         }
         samples += count;
         await checkpoint();

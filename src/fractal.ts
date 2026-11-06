@@ -23,6 +23,17 @@ function smooth(iteration: number, logRadius: number): number {
   return iteration + 1 - Math.log2(logRadius);
 }
 
+/**
+ * Distance estimate of the most recent sample, in units of the pixel size
+ * the iteration was given (NaN for interior, unresolved or fallback samples).
+ * Kernels track z' = dz/dc times the pixel size (z'_{n+1} = 2 z_n z'_n + pixel),
+ * which stays within double range at any depth, and at escape
+ * |z| ln|z| / |z'| is the distance to the set within a factor of about 2.
+ */
+let distance = NaN;
+export function lastDistance(): number { return distance; }
+const escapeDistance = (squared: number, dr: number, di: number) => Math.sqrt(squared) * 0.5 * Math.log(squared) / Math.hypot(dr, di);
+
 export function insideFixed(cr: bigint, ci: bigint, bits: number): boolean {
   const unit = 1n << BigInt(bits);
   const y2 = ci * ci;
@@ -32,17 +43,23 @@ export function insideFixed(cr: bigint, ci: bigint, bits: number): boolean {
   return q * (q + x * unit) <= y2 * unit * unit / 4n;
 }
 
-export function directDouble(cr: number, ci: number, limit: number): number {
+/** Sets lastDistance() on escape, in units of `pixel` (the distance from c to c + 1 pixel). */
+export function directDouble(cr: number, ci: number, limit: number, pixel = 1): number {
   const q = (cr - 0.25) ** 2 + ci * ci;
   if (q * (q + cr - 0.25) <= 0.25 * ci * ci || (cr + 1) ** 2 + ci * ci <= 1 / 16) return INTERIOR;
-  let re = 0, im = 0, r2 = 0, i2 = 0;
+  let re = 0, im = 0, r2 = 0, i2 = 0, dr = 0, di = 0;
   let savedRe = 0, savedIm = 0, checkpoint = 32;
   for (let n = 1; n <= limit; n++) {
+    const next = 2 * (re * dr - im * di) + pixel;
+    di = 2 * (re * di + im * dr); dr = next;
     im = 2 * re * im + ci;
     re = r2 - i2 + cr;
     r2 = re * re;
     i2 = im * im;
-    if (r2 + i2 > 256) return smooth(n, Math.log2(Math.hypot(re, im)));
+    if (r2 + i2 > 256) {
+      distance = escapeDistance(r2 + i2, dr, di);
+      return smooth(n, Math.log2(Math.hypot(re, im)));
+    }
     // Exact repeated states cannot escape later. Check sparsely to keep the
     // common, quickly escaping path cheap; no approximate interior threshold.
     if ((n & 31) === 0) {
@@ -96,14 +113,16 @@ function trappedDouble(cr: number, ci: number, zr: number, zi: number, period: n
  * are handled inline, and saved states are compared on chunk boundaries: an
  * exactly repeated state can never escape (as in directDouble), and a near
  * return starts an interior proof (trappedDouble) on a copy of the orbit.
+ * Distance estimates (as directDouble's) go to `distances`, NaN for interiors.
  * Returns how many samples reached the budget unresolved.
  */
-export function directRow(cr: Float64Array, ci: number, count: number, limit: number, out: Float64Array): number {
+export function directRow(cr: Float64Array, ci: number, count: number, limit: number, out: Float64Array,
+  distances?: Float64Array, pixel = 1): number {
   let next = 0, unresolved = 0;
   const take = () => {
     while (next < count) {
       const i = next++;
-      if (insideDouble(cr[i], ci)) out[i] = INTERIOR;
+      if (insideDouble(cr[i], ci)) { out[i] = INTERIOR; if (distances) distances[i] = NaN; }
       else return i;
     }
     return -1;
@@ -114,9 +133,10 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
   let p0 = take(), c0 = p0 < 0 ? 0 : cr[p0], q0 = p0 < 0 ? 0 : ci;
   let p1 = take(), c1 = p1 < 0 ? 0 : cr[p1], q1 = p1 < 0 ? 0 : ci;
   let p2 = take(), c2 = p2 < 0 ? 0 : cr[p2], q2 = p2 < 0 ? 0 : ci;
-  let x0 = 0, y0 = 0, a0 = 0, b0 = 0, n0 = 0, s0 = 0, t0 = 0, m0 = 0, k0 = 32, w0 = 0;
-  let x1 = 0, y1 = 0, a1 = 0, b1 = 0, n1 = 0, s1 = 0, t1 = 0, m1 = 0, k1 = 32, w1 = 0;
-  let x2 = 0, y2 = 0, a2 = 0, b2 = 0, n2 = 0, s2 = 0, t2 = 0, m2 = 0, k2 = 32, w2 = 0;
+  let x0 = 0, y0 = 0, a0 = 0, b0 = 0, n0 = 0, s0 = 0, t0 = 0, m0 = 0, k0 = 32, w0 = 0, u0 = 0, v0 = 0;
+  let x1 = 0, y1 = 0, a1 = 0, b1 = 0, n1 = 0, s1 = 0, t1 = 0, m1 = 0, k1 = 32, w1 = 0, u1 = 0, v1 = 0;
+  let x2 = 0, y2 = 0, a2 = 0, b2 = 0, n2 = 0, s2 = 0, t2 = 0, m2 = 0, k2 = 32, w2 = 0, u2 = 0, v2 = 0;
+  let g = 0;
   while (p0 >= 0 || p1 >= 0 || p2 >= 0) {
     let chunk = LANE_CHUNK;
     if (p0 >= 0) chunk = Math.min(chunk, limit - n0);
@@ -126,8 +146,11 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
     while (step < chunk) {
       // The hot loop stays minimal; escapes are handled outside it, then the chunk resumes.
       while (step < chunk) {
+        g = 2 * (x0 * u0 - y0 * v0) + pixel; v0 = 2 * (x0 * v0 + y0 * u0); u0 = g;
         y0 = 2 * x0 * y0 + q0; x0 = a0 - b0 + c0; a0 = x0 * x0; b0 = y0 * y0;
+        g = 2 * (x1 * u1 - y1 * v1) + pixel; v1 = 2 * (x1 * v1 + y1 * u1); u1 = g;
         y1 = 2 * x1 * y1 + q1; x1 = a1 - b1 + c1; a1 = x1 * x1; b1 = y1 * y1;
+        g = 2 * (x2 * u2 - y2 * v2) + pixel; v2 = 2 * (x2 * v2 + y2 * u2); u2 = g;
         y2 = 2 * x2 * y2 + q2; x2 = a2 - b2 + c2; a2 = x2 * x2; b2 = y2 * y2;
         step++;
         if (a0 + b0 > 256 || a1 + b1 > 256 || a2 + b2 > 256) break;
@@ -136,18 +159,21 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       // iteration count; its save point m stays absolute (0), so a fresh z = 0 is no repeat.
       if (a0 + b0 > 256) {
         out[p0] = smooth(n0 + step, Math.log2(Math.hypot(x0, y0)));
+        if (distances) distances[p0] = escapeDistance(a0 + b0, u0, v0);
         p0 = take(); c0 = p0 < 0 ? 0 : cr[p0]; q0 = p0 < 0 ? 0 : ci;
-        x0 = y0 = a0 = b0 = s0 = t0 = m0 = w0 = 0; n0 = -step; k0 = 32;
+        x0 = y0 = a0 = b0 = s0 = t0 = m0 = w0 = u0 = v0 = 0; n0 = -step; k0 = 32;
       }
       if (a1 + b1 > 256) {
         out[p1] = smooth(n1 + step, Math.log2(Math.hypot(x1, y1)));
+        if (distances) distances[p1] = escapeDistance(a1 + b1, u1, v1);
         p1 = take(); c1 = p1 < 0 ? 0 : cr[p1]; q1 = p1 < 0 ? 0 : ci;
-        x1 = y1 = a1 = b1 = s1 = t1 = m1 = w1 = 0; n1 = -step; k1 = 32;
+        x1 = y1 = a1 = b1 = s1 = t1 = m1 = w1 = u1 = v1 = 0; n1 = -step; k1 = 32;
       }
       if (a2 + b2 > 256) {
         out[p2] = smooth(n2 + step, Math.log2(Math.hypot(x2, y2)));
+        if (distances) distances[p2] = escapeDistance(a2 + b2, u2, v2);
         p2 = take(); c2 = p2 < 0 ? 0 : cr[p2]; q2 = p2 < 0 ? 0 : ci;
-        x2 = y2 = a2 = b2 = s2 = t2 = m2 = w2 = 0; n2 = -step; k2 = 32;
+        x2 = y2 = a2 = b2 = s2 = t2 = m2 = w2 = u2 = v2 = 0; n2 = -step; k2 = 32;
       }
       if (p0 < 0 && p1 < 0 && p2 < 0) break;
       // Lanes reloaded here start at n = 0; the budget is far more than one chunk away.
@@ -167,9 +193,10 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       }
       if (done) {
         out[p0] = INTERIOR;
+        if (distances) distances[p0] = NaN;
         if (n0 >= limit && !(x0 === s0 && y0 === t0)) unresolved++;
         p0 = take(); c0 = p0 < 0 ? 0 : cr[p0]; q0 = p0 < 0 ? 0 : ci;
-        x0 = y0 = a0 = b0 = n0 = s0 = t0 = m0 = w0 = 0; k0 = 32;
+        x0 = y0 = a0 = b0 = n0 = s0 = t0 = m0 = w0 = u0 = v0 = 0; k0 = 32;
       } else if (n0 >= k0 || realign) {
         s0 = x0; t0 = y0; m0 = n0;
         if (n0 >= k0) k0 *= 2;
@@ -187,9 +214,10 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       }
       if (done) {
         out[p1] = INTERIOR;
+        if (distances) distances[p1] = NaN;
         if (n1 >= limit && !(x1 === s1 && y1 === t1)) unresolved++;
         p1 = take(); c1 = p1 < 0 ? 0 : cr[p1]; q1 = p1 < 0 ? 0 : ci;
-        x1 = y1 = a1 = b1 = n1 = s1 = t1 = m1 = w1 = 0; k1 = 32;
+        x1 = y1 = a1 = b1 = n1 = s1 = t1 = m1 = w1 = u1 = v1 = 0; k1 = 32;
       } else if (n1 >= k1 || realign) {
         s1 = x1; t1 = y1; m1 = n1;
         if (n1 >= k1) k1 *= 2;
@@ -207,9 +235,10 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       }
       if (done) {
         out[p2] = INTERIOR;
+        if (distances) distances[p2] = NaN;
         if (n2 >= limit && !(x2 === s2 && y2 === t2)) unresolved++;
         p2 = take(); c2 = p2 < 0 ? 0 : cr[p2]; q2 = p2 < 0 ? 0 : ci;
-        x2 = y2 = a2 = b2 = n2 = s2 = t2 = m2 = w2 = 0; k2 = 32;
+        x2 = y2 = a2 = b2 = n2 = s2 = t2 = m2 = w2 = u2 = v2 = 0; k2 = 32;
       } else if (n2 >= k2 || realign) {
         s2 = x2; t2 = y2; m2 = n2;
         if (n2 >= k2) k2 *= 2;
@@ -421,11 +450,13 @@ const ROUNDING = 2 ** -50;
  * Escaping pixels are unaffected (the check can only ever return INTERIOR),
  * and attempts are capped so they never more than double a pixel's work.
  */
-function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: number, fallback: () => number, stats: SampleStats): number {
+function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: number, fallback: () => number, stats: SampleStats, pixel: number): number {
   const real = reference.real, imag = reference.imag, first = reference.firstRadiusSquared, glitch = reference.glitch;
   const end = real.length - 1;
   // zr, zi always hold Z_m; deltaSquared holds |δ|² for the current δ.
   let dr = 0, di = 0, m = 0, n = 0, zr = real[0], zi = imag[0], deltaSquared = 0;
+  // dz/dc times the pixel size; unaffected by rebasing (z itself is unchanged). A BLA block maps it as δ: A z' + B pixel.
+  let er = 0, ei = 0;
   // Interior proof state: the base is the smallest |z| since the last reset.
   // Above `far`, |z|² is certainly outside the band around |base|²: nothing to track.
   let baseRe = 0, baseIm = 0, baseSquared = Infinity, far = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
@@ -443,6 +474,8 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
     if (skipped) {
       const table = reference.native[level], o = ((m - 1) >> level) * NATIVE_FIELDS, length = 1 << level;
       const ar = table[o], ai = table[o + 1], br = table[o + 2], bi = table[o + 3];
+      const nextEr = ar * er - ai * ei + br * pixel;
+      ei = ar * ei + ai * er + bi * pixel; er = nextEr;
       const nextRe = ar * dr - ai * di + br * dcRe - bi * dcIm;
       di = ar * di + ai * dr + br * dcIm + bi * dcRe;
       dr = nextRe;
@@ -454,6 +487,8 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
         ra = ra * (twice + ra) + rounding; rb = rb * (twice + rb) + rounding;
         rc = rc * (twice + rc) + rounding; rd = rd * (twice + rd) + rounding;
       }
+      const tr = zr + dr, ti = zi + di, nextEr = 2 * (tr * er - ti * ei) + pixel;
+      ei = 2 * (tr * ei + ti * er); er = nextEr;
       const nextRe = 2 * (zr * dr - zi * di) + dr * dr - di * di + dcRe;
       di = 2 * (zr * di + zi * dr + dr * di) + dcIm;
       dr = nextRe;
@@ -462,7 +497,11 @@ function perturbNative(reference: Reference, dcRe: number, dcIm: number, limit: 
     zr = real[m]; zi = imag[m];
     const totalRe = zr + dr, totalIm = zi + di;
     const squared = totalRe * totalRe + totalIm * totalIm;
-    if (!(squared <= 256)) return Number.isFinite(squared) ? smooth(n, 0.5 * Math.log2(squared)) : fallback();
+    if (!(squared <= 256)) {
+      if (!Number.isFinite(squared)) return fallback();
+      distance = escapeDistance(squared, er, ei);
+      return smooth(n, 0.5 * Math.log2(squared));
+    }
     deltaSquared = dr * dr + di * di;
     let rebase: boolean;
     if (squared >= 1e-280) {
@@ -538,10 +577,13 @@ const negate = (a: Extended): Extended => ({ re: -a.re, im: -a.im, exp: a.exp })
  * Extended-exponent perturbation, with the same interior proof as
  * perturbNative; radii are tracked as log2 so they cannot underflow.
  */
-function perturbExtended(reference: Reference, dc: Extended, limit: number, fallback: () => number, stats: SampleStats): number {
+function perturbExtended(reference: Reference, dc: Extended, limit: number, fallback: () => number, stats: SampleStats, logPixel: number): number {
   const orbit = reference.orbit!;
   const logDc = logMagnitude(dc);
   let delta = ZERO, m = 0, n = 0;
+  // z' (dz/dc times the pixel size) as (er, ei) 2^eExp, with lift = pixel / 2^eExp; zr, zi hold z itself (|z| <= 16).
+  const pixelExponent = Math.floor(logPixel), pixel = extended(2 ** (logPixel - pixelExponent), 0, pixelExponent);
+  let er = 0, ei = 0, eExp = pixel.exp, lift = pixel.re, zr = 0, zi = 0;
   let base: Extended | undefined, baseLog = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
   let verify = 0, spent = 0, steps = 0, start = ZERO, startError = -Infinity, logRadius0 = -Infinity;
   const logRadii = [-Infinity, -Infinity, -Infinity, -Infinity];
@@ -550,6 +592,8 @@ function perturbExtended(reference: Reference, dc: Extended, limit: number, fall
     const block = verify ? undefined : lookupExtended(reference, m, logMagnitude(delta), limit - n);
     const skipped = block !== undefined;
     if (block) {
+      const derivative = linear(block.a, { re: er, im: ei, exp: eExp }, block.b, pixel);
+      er = derivative.re; ei = derivative.im; eExp = derivative.exp; lift = 2 ** (logPixel - eExp);
       delta = linear(block.a, delta, block.b, dc);
       m += block.length; n += block.length; stats.skipped += block.length - 1;
     } else {
@@ -558,13 +602,21 @@ function perturbExtended(reference: Reference, dc: Extended, limit: number, fall
         const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
         for (let i = 0; i < 4; i++) logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
       }
+      const nextEr = 2 * (zr * er - zi * ei) + lift;
+      ei = 2 * (zr * ei + zi * er); er = nextEr;
+      if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
       delta = perturbStep(orbit[m], delta, dc);
       m++; n++;
     }
     const z = orbit[m];
     const total = add(z, delta);
     const logTotal = logMagnitude(total);
-    if (logTotal > 4) return smooth(n, logTotal);
+    if (logTotal > 4) {
+      distance = 2 ** (logTotal - Math.log2(Math.hypot(er, ei)) - eExp) * logTotal * Math.LN2;
+      return smooth(n, logTotal);
+    }
+    const unit = 2 ** total.exp;
+    zr = total.re * unit; zi = total.im * unit;
     if (logTotal < logMagnitude(z) - 24 || Number.isNaN(logTotal)) return fallback();
     const rebase = logTotal < logMagnitude(delta) || m === orbit.length - 1;
     if (verify) {
@@ -602,8 +654,8 @@ function perturbExtended(reference: Reference, dc: Extended, limit: number, fall
 
 export interface Sampler {
   sample(x: number, y: number): number;
-  /** Optional faster path for a row of samples sharing one y (CSS offsets from the centre). */
-  row?(xs: Float64Array, count: number, y: number, out: Float64Array): void;
+  /** Optional faster path for a row of samples sharing one y (CSS offsets from the centre), with distance estimates. */
+  row?(xs: Float64Array, count: number, y: number, out: Float64Array, distances: Float64Array): void;
   stats: SampleStats;
 }
 
@@ -621,16 +673,17 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
     const cr = fixedToNumber(view.re, view.bits), ci = fixedToNumber(view.im, view.bits);
     const scale = 2 ** view.logScale;
     let row = new Float64Array(0);
-    return { stats, sample: (x, y) => directDouble(cr + x * scale, ci - y * scale, limit),
-      row(xs, count, y, out) {
+    return { stats,
+      sample(x, y) { distance = NaN; return directDouble(cr + x * scale, ci - y * scale, limit, scale); },
+      row(xs, count, y, out, distances) {
         if (row.length < count) row = new Float64Array(count);
         for (let i = 0; i < count; i++) row[i] = cr + xs[i] * scale;
-        stats.unresolved += directRow(row, ci - y * scale, count, limit, out);
+        stats.unresolved += directRow(row, ci - y * scale, count, limit, out, distances, scale);
       } };
   }
   const logRadius = viewLogRadius(view, cssWidth, cssHeight);
   const interior = interiorStatus(view, logRadius);
-  if (interior === 'inside') return { stats, sample: () => INTERIOR };
+  if (interior === 'inside') return { stats, sample: () => { distance = NaN; return INTERIOR; } };
   const exactInterior = interior === 'near';
 
   const native = view.logScale > EXTENDED_LOG_SCALE;
@@ -650,6 +703,7 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   const offsetRe = offset.re * 2 ** offset.exp, offsetIm = offset.im * 2 ** offset.exp;
   return { stats, sample(x, y) {
     // Fixed-point is only used per pixel for exact interior tests or detected glitches.
+    distance = NaN;
     let cr: bigint | undefined, ci: bigint | undefined;
     const coordinates = () => {
       cr ??= view.re + scaledFixed(x, view.logScale, view.bits);
@@ -664,9 +718,9 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
       return directFixed(cr!, ci!, view.bits, limit);
     };
     return native
-      ? perturbNative(reference, offsetRe + x * scale, offsetIm - y * scale, limit, fallback, stats)
-      : perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats);
+      ? perturbNative(reference, offsetRe + x * scale, offsetIm - y * scale, limit, fallback, stats, scale)
+      : perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats, view.logScale);
   } };
 }
 
-export { color, colorWord, lapsOf, LAPS_PER_E_FOLD } from './palette.ts';
+export { color, colorWord, lapsOf, LAPS_PER_E_FOLD, shadedWord } from './palette.ts';

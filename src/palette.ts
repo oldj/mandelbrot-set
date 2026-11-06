@@ -150,6 +150,36 @@ export function colorWord(value: number): number {
 }
 
 const scratch = new Uint32Array(1), scratchBytes = new Uint8Array(scratch.buffer);
+const scratchClamped = new Uint8ClampedArray(scratch.buffer);
+
+/**
+ * Distance-estimate shading, as in many deep-zoom renderers: pixels within
+ * half a pixel of the set's boundary are darkened, by up to 65% right on it.
+ * Any fixed count-to-colour mapping lets some views fall into a stretch of
+ * the gradient with little contrast (pale cyan to white, or dark violet),
+ * where filaments vanish into the background; the darkened outlines bring
+ * them back whatever the hue, keeping it (all channels scale together).
+ * The distance comes from each pixel's own derivative, so there is no
+ * neighbour noise, and is measured in screen pixels, so outlines look the
+ * same at every depth. The hue stays a fixed function of the count. The
+ * first lap (the animation's own colouring) is left as is, with the outlines
+ * fading in over the second.
+ */
+const EDGE_REACH = 0.5, EDGE_DEPTH = 0.65;
+
+/** The pixel colour with boundary shading; `distance` is the distance estimate in screen pixels (NaN if unknown). */
+export function shadedWord(value: number, distance: number): number {
+  if (value === -1) return INTERIOR_WORD;
+  const laps = lapsOf(value), index = Math.min(SIZE - 1, Math.floor((laps - Math.floor(laps)) * SIZE));
+  if (laps < 1) return packed[index];
+  const word = packedLater[index];
+  if (!(distance < EDGE_REACH)) return word;
+  const keep = 1 - Math.min(1, laps - 1) * EDGE_DEPTH * (1 - Math.sqrt(distance / EDGE_REACH));
+  scratch[0] = word;
+  for (let c = 0; c < 3; c++) scratchClamped[c] = scratchClamped[c] * keep;
+  return scratch[0];
+}
+
 export function color(value: number, pixels: Uint8ClampedArray, offset: number): void {
   scratch[0] = colorWord(value);
   pixels.set(scratchBytes, offset);

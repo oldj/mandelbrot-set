@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { initialView, ensurePrecision, toFixed } from '../src/precision.ts';
-import { color, directDouble, iterationBudget } from '../src/fractal.ts';
+import { color, colorWord, directDouble, iterationBudget, lastDistance, shadedWord } from '../src/fractal.ts';
 import { missingRegions, panRaster, shiftQuality } from '../src/raster-cache.ts';
 import { transformView } from '../src/precision.ts';
 
@@ -175,8 +175,8 @@ test('reused coarse samples leave a deep render identical to sampling every pixe
   const sampler = await createSampler(request.view, 37, 29, request.iterations, async () => {});
   for (const tile of tiles.filter(tile => tile.step === 1)) {
     for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
-      const expected = new Uint8ClampedArray(4);
-      color(sampler.sample(tile.x + col + 0.5 - 18.5, tile.y + row + 0.5 - 14.5), expected, 0);
+      const value = sampler.sample(tile.x + col + 0.5 - 18.5, tile.y + row + 0.5 - 14.5);
+      const expected = new Uint8ClampedArray(new Uint32Array([shadedWord(value, lastDistance())]).buffer);
       const offset = (row * tile.width + col) * 4;
       assert.deepEqual(tile.pixels.slice(offset, offset + 4), expected);
     }
@@ -186,4 +186,37 @@ test('reused coarse samples leave a deep render identical to sampling every pixe
     const covered = tiles.filter(tile => tile.step === step).reduce((n, tile) => n + tile.clipWidth * tile.clipHeight, 0);
     assert.equal(covered, 37 * 29);
   }
+});
+
+test('outlines use each pixel\'s distance estimate in physical pixels, the same as per-pixel sampling', async t => {
+  // The reported 1.50e47 view: counts ~1350-1400, past the first lap, so outlines apply.
+  const width = 75, height = 45, cssWidth = 50, cssHeight = 30;
+  const initial = initialView(cssWidth, cssHeight);
+  const view = ensurePrecision({ ...initial, logScale: initial.logScale - Math.log2(1.5e47) + 3 });
+  const decimal = text => {
+    const [whole, fraction] = text.split('.');
+    return BigInt(whole + fraction) * (1n << BigInt(view.bits)) / 10n ** BigInt(fraction.length);
+  };
+  view.re = decimal('-0.69378820112974505918001981502679506278690352790793731');
+  view.im = decimal('-0.34952527748216184476632029598345669714154984468763950');
+  const request = { id: 1, view, width, height, cssWidth, cssHeight, iterations: iterationBudget(view.logScale), workerIndex: 0, workerCount: 2 };
+  const [first, second] = [startWorker(t), startWorker(t)];
+  const tiles = (await Promise.all([collect(first, request), collect(second, { ...request, workerIndex: 1 })])).flat();
+  const { createSampler } = await import('../src/fractal.ts');
+  const sampler = await createSampler(view, cssWidth, cssHeight, request.iterations, async () => {});
+  let shaded = 0, checked = 0;
+  for (const tile of tiles.filter(tile => tile.step === 1)) {
+    const words = new Uint32Array(tile.pixels.buffer, tile.pixels.byteOffset, tile.width * tile.height);
+    for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
+      const x = tile.x + col, y = tile.y + row;
+      const value = sampler.sample((x + 0.5) / width * cssWidth - cssWidth / 2, (y + 0.5) / height * cssHeight - cssHeight / 2);
+      // Physical pixels are 2/3 of a CSS pixel here.
+      const expected = shadedWord(value, lastDistance() * 1.5);
+      assert.equal(words[row * tile.width + col], expected, `${x},${y}`);
+      if (expected !== colorWord(value)) shaded++;
+      checked++;
+    }
+  }
+  assert.equal(checked, width * height);
+  assert.ok(shaded > checked / 10, `outlines change part of this view (${shaded} of ${checked})`);
 });

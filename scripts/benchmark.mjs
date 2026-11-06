@@ -5,7 +5,7 @@ const source = resolve(process.argv[2] || 'src');
 const { createSampler, iterationBudget, color } = await import(pathToFileURL(`${source}/fractal.ts`));
 const { initialView, ensurePrecision, toFixed } = await import(pathToFileURL(`${source}/precision.ts`));
 const width = 160, height = 100, cssWidth = 1280, cssHeight = 800;
-const xs = new Float64Array(width), values = new Float64Array(width);
+const xs = new Float64Array(width), values = new Float64Array(width), distances = new Float64Array(width);
 const decimal = (text, bits) => {
   const [whole, fraction] = text.split('.');
   return BigInt(whole + fraction) * (1n << BigInt(bits)) / 10n ** BigInt(fraction.length);
@@ -38,7 +38,7 @@ for (const [scene, view] of scenes) {
       // Use the row path where the sampler has one, as the workers do.
       for (let x = 0; x < width; x++) xs[x] = (x + 0.5) / width * cssWidth - cssWidth / 2;
       const cy = (y + 0.5) / height * cssHeight - cssHeight / 2;
-      if (sampler.row) sampler.row(xs, width, cy, values);
+      if (sampler.row) sampler.row(xs, width, cy, values, distances);
       else for (let x = 0; x < width; x++) values[x] = sampler.sample(xs[x], cy);
       for (let x = 0; x < width; x++) {
         color(values[x], pixel, 0);

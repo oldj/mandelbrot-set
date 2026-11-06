@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { color, createSampler, INTERIOR, iterationBudget, lapsOf, LAPS_PER_E_FOLD } from '../src/fractal.ts';
+import { color, colorWord, createSampler, INTERIOR, iterationBudget, lapsOf, LAPS_PER_E_FOLD, lastDistance, shadedWord } from '../src/fractal.ts';
+import { parseViewHash } from '../src/url-state.ts';
 import { ensurePrecision, initialView } from '../src/precision.ts';
 
 function rgb(value) {
@@ -117,4 +118,53 @@ test('after the first lap, the dark stretch is only a short accent between red a
   // Seamless where the first lap ends.
   const end = rgb(1020 - 1e-6), next = rgb(1020 + 1e-6);
   assert.ok(end.every((channel, i) => Math.abs(channel - next[i]) <= 1), `${end} vs ${next}`);
+});
+
+const bytes = word => [...new Uint8Array(new Uint32Array([word]).buffer).slice(0, 3)];
+const luma = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+test('boundary shading darkens only within half a pixel of the set, keeps the hue, and spares the first lap', () => {
+  for (const value of [3, 97, 400, 1019, 5000, 80000]) {
+    for (const distance of [NaN, 0.5, 3, Infinity]) assert.equal(shadedWord(value, distance), colorWord(value));
+  }
+  // The first lap stays the animation's colouring whatever the distance.
+  for (const value of [10, 300, 900]) assert.equal(shadedWord(value, 0), colorWord(value));
+  assert.equal(shadedWord(INTERIOR, 0), colorWord(INTERIOR));
+  for (const value of [3000, 7700, 60000]) {
+    const flat = bytes(colorWord(value));
+    let previous = luma(flat);
+    for (const distance of [0.4, 0.2, 0.05, 0.01, 0]) {
+      const shaded = bytes(shadedWord(value, distance));
+      assert.ok(luma(shaded) <= previous, `${value}: darker closer to the boundary`);
+      previous = luma(shaded);
+      // All channels scale together: the hue is kept.
+      const keep = 1 - 0.65 * (1 - Math.sqrt(distance / 0.5));
+      shaded.forEach((channel, i) => assert.ok(Math.abs(channel - flat[i] * keep) <= 1, `${value} at ${distance}: ${shaded} vs ${flat} x ${keep}`));
+    }
+  }
+  // Outlines fade in over the second lap: no jump where the first ends.
+  const end = bytes(shadedWord(1020 - 1e-6, 0)), next = bytes(shadedWord(1020 + 1e-6, 0));
+  assert.ok(end.every((channel, i) => Math.abs(channel - next[i]) <= 1), `${end} vs ${next}`);
+});
+
+test('reported 1.18e119 view, nearly white in flat colour, gets clear outlines from distance shading', async () => {
+  const width = 1280, height = 800;
+  const view = parseViewHash('#re=-0.74665527911170207118468285365617560786145123877730509618240731381329753779532187234596071794312920600729523984412969804261881&im=0.14835731640608019892777532866594623137495516228504355790577996795450012138625629814703902723256411237557027409935715426305866&zoom=1.18101464e119',
+    initialView(width, height).logScale);
+  const sampler = await createSampler(view, width, height, iterationBudget(view.logScale), async () => {});
+  const flat = [], shaded = [];
+  for (let y = -398; y < 400; y += 7) for (let x = -638; x < 640; x += 7) {
+    const value = sampler.sample(x, y);
+    assert.ok(value > 0);
+    flat.push(luma(bytes(colorWord(value))));
+    shaded.push(luma(bytes(shadedWord(value, lastDistance()))));
+  }
+  const spread = values => {
+    const mean = values.reduce((a, b) => a + b) / values.length;
+    return Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / values.length);
+  };
+  const share = (values, test) => values.filter(test).length / values.length;
+  assert.ok(share(flat, v => v < 200) < 0.05, 'flat colour is almost all near-white');
+  assert.ok(spread(shaded) > 2 * spread(flat), `contrast ${spread(shaded)} vs ${spread(flat)}`);
+  assert.ok(share(shaded, v => v < 170) > 0.05, `outlined structure (${share(shaded, v => v < 170)})`);
 });

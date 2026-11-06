@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSampler, directDouble, directFixed, iterationBudget } from '../src/fractal.ts';
+import { createSampler, directDouble, directFixed, iterationBudget, lastDistance } from '../src/fractal.ts';
 import { ensurePrecision, scaledFixed, toFixed, transformView } from '../src/precision.ts';
 
 const noop = async () => {};
@@ -146,8 +146,13 @@ test('three-lane rows are bit-identical to directDouble, including proven interi
     for (let j = 0; j < 24; j++) {
       const ci = cy + (j - 12) * scale * 5;
       for (let i = 0; i < xs.length; i++) xs[i] = cx + (i - 48) * scale;
-      directRow(xs, ci, xs.length, limit, out);
-      for (let i = 0; i < xs.length; i++) assert.ok(Object.is(out[i], directDouble(xs[i], ci, limit)), `${cx},${cy} row ${j} col ${i}`);
+      const distances = new Float64Array(97);
+      directRow(xs, ci, xs.length, limit, out, distances, scale);
+      for (let i = 0; i < xs.length; i++) {
+        const value = directDouble(xs[i], ci, limit, scale), distance = value === INTERIOR ? NaN : lastDistance();
+        assert.ok(Object.is(out[i], value), `${cx},${cy} row ${j} col ${i}`);
+        assert.ok(Object.is(distances[i], distance), `distance ${cx},${cy} row ${j} col ${i}: ${distances[i]} vs ${distance}`);
+      }
     }
   }
 });
@@ -183,4 +188,46 @@ test('deep minibrot interiors are proved instead of iterating the whole budget',
   for (let k = 0; k < 24; k++) assert.equal(sampler.sample((k % 6) * 10 - 25, Math.floor(k / 6) * 10 - 15), INTERIOR);
   assert.equal(sampler.stats.unresolved, 0);
   assert.ok(performance.now() - started < 1000, 'running 32768 extended iterations per sample would take far longer');
+});
+
+/**
+ * Distance estimate |z| ln|z| / |dz/dc| in pixels, with z in fixed point and
+ * dz/dc in doubles with a separate exponent (it reaches 2^2000 here).
+ */
+function oracleDistance(view, x, y, limit) {
+  const bits = view.bits + 64, B = BigInt(bits);
+  const cr = (view.re << 64n) + scaledFixed(x, view.logScale, bits), ci = (view.im << 64n) - scaledFixed(y, view.logScale, bits);
+  const number = v => Number(v >> (B - 60n)) / 2 ** 60;
+  let re = 0n, im = 0n, dr = 0, di = 0, exp = 0;
+  for (let n = 1; n <= limit; n++) {
+    const zr = number(re), zi = number(im), next = 2 * (zr * dr - zi * di) + 2 ** -exp;
+    di = 2 * (zr * di + zi * dr); dr = next;
+    if (Math.abs(dr) + Math.abs(di) > 2 ** 256) { dr *= 2 ** -256; di *= 2 ** -256; exp += 256; }
+    const r2 = re * re, i2 = im * im;
+    im = ((2n * re * im) >> B) + ci; re = ((r2 - i2) >> B) + cr;
+    const magnitude = Math.hypot(number(re), number(im));
+    if (magnitude > 16) return 2 ** (Math.log2(magnitude * Math.log(magnitude)) - Math.log2(Math.hypot(dr, di)) - exp - view.logScale);
+  }
+  return NaN;
+}
+
+test('distance estimates agree with a high-precision derivative at every depth, through BLA skips', async () => {
+  const cases = [[viewAt(-0.743643887037151, 0.13182590420533, -30), 5000], [viewAt(-0.743643887037151, 0.13182590420533, -60), 5000],
+    ...[-100, -400, -899, -1100, -2000].map(depth => [viewAt(-2, 0, depth), 2048])];
+  for (const [view, limit] of cases) {
+    const sampler = await createSampler(view, 32, 24, limit, noop);
+    let checked = 0;
+    for (const x of [-15, -4, -0.5, 0.5, 4, 15]) for (const y of [-10, -0.5, 0.5, 10]) {
+      const value = sampler.sample(x, y), distance = lastDistance();
+      if (value === INTERIOR) { assert.ok(Number.isNaN(distance)); continue; }
+      // Within ~1e-3 pixel of the boundary the orbit is too sensitive for any
+      // double-precision z to follow; all such pixels get the full outline anyway.
+      const expected = oracleDistance(view, x, y, limit);
+      if (expected < 1e-3) assert.ok(distance < 1e-2, `2^${view.logScale} at ${x},${y}: ${distance} vs ${expected}`);
+      else assert.ok(Math.abs(distance / expected - 1) < 1e-3, `2^${view.logScale} at ${x},${y}: ${distance} vs ${expected}`);
+      checked++;
+    }
+    assert.ok(checked > 12, `escaping samples at 2^${view.logScale}`);
+    if (view.logScale < -100) assert.ok(sampler.stats.skipped > 0);
+  }
 });
