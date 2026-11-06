@@ -1,10 +1,12 @@
 import { color, createSampler } from './fractal.ts';
 import type { ReferenceCache } from './fractal';
-import type { RenderCommand, RenderMessage, RenderRequest } from './types';
+import type { RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
 
 let generation = 0;
 const referenceCache: ReferenceCache = {};
 const CANCELLED = Symbol('cancelled');
+/** Batch finished tiles; each main-thread message and canvas upload has a fixed cost. */
+const FLUSH_MS = 16;
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
@@ -27,6 +29,11 @@ async function render(request: RenderRequest): Promise<void> {
   };
   const { id, view, width, height, cssWidth, cssHeight, workerIndex, workerCount, iterations } = request;
   const regions = request.regions ?? [{ x: 0, y: 0, width, height }];
+  let batch: TileData[] = [], transfer: ArrayBuffer[] = [], lastFlush = started;
+  const flush = () => {
+    if (batch.length) send({ type: 'tiles', id, tiles: batch }, transfer);
+    batch = []; transfer = []; lastFlush = performance.now();
+  };
   const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache) : undefined;
   // All passes sample the same world rectangle. Coarse pixels are replaced, not stretched forever.
   for (const step of [8, 4, 2, 1]) {
@@ -48,13 +55,16 @@ async function render(request: RenderRequest): Promise<void> {
           }
           await checkpoint();
         }
-        send({ type: 'tile', id, x: region.x + tx * step, y: region.y + ty * step, width: w, height: h,
+        batch.push({ x: region.x + tx * step, y: region.y + ty * step, width: w, height: h,
           clipWidth: Math.min(region.width - tx * step, w * step), clipHeight: Math.min(region.height - ty * step, h * step),
-          step, pixels }, [pixels.buffer]);
+          step, pixels });
+        transfer.push(pixels.buffer);
+        if (performance.now() - lastFlush >= FLUSH_MS) flush();
       }
       tileOffset += tilesX * tilesY;
     }
     await checkpoint();
+    flush();
     send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0 });
   }
 }

@@ -17,9 +17,8 @@ export interface RenderRequest {
   regions?: RenderRegion[];
 }
 
-export interface RenderTile {
-  type: 'tile';
-  id: number;
+/** One finished tile; `step` is the sample spacing in physical pixels. */
+export interface TileData {
   x: number;
   y: number;
   width: number;
@@ -30,6 +29,13 @@ export interface RenderTile {
   pixels: Uint8ClampedArray<ArrayBuffer>;
 }
 
+/** Tiles are batched so fast shallow passes don't flood the main thread with messages. */
+export interface RenderTiles {
+  type: 'tiles';
+  id: number;
+  tiles: TileData[];
+}
+
 export interface RenderProgress {
   type: 'pass';
   id: number;
@@ -38,4 +44,4 @@ export interface RenderProgress {
   fallbacks: number;
 }
 
-export type RenderMessage = RenderTile | RenderProgress | { type: 'error'; id: number; message: string };
+export type RenderMessage = RenderTiles | RenderProgress | { type: 'error'; id: number; message: string };

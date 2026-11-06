@@ -3,7 +3,8 @@ import type { Point, View } from './precision';
 import { iterationBudget } from './fractal';
 import { gesture, wheelAnchor, wheelLogFactor } from './gestures';
 import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
-import { claimTile, missingRegions, panRaster, shiftQuality } from './raster-cache';
+import { missingRegions, panRaster, shiftQuality } from './raster-cache';
+import { TileStage } from './tile-stage';
 import { renderWorkerCount, workerCapacity } from './worker-policy';
 import type { RenderMessage, RenderRequest } from './types';
 
@@ -43,8 +44,24 @@ let activeWorkerCount = 1;
 interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number }
 let surface: Surface | undefined;
 let quality = new Uint8Array();
-const tileCanvas = document.createElement('canvas');
-const tileContext = tileCanvas.getContext('2d', { alpha: false })!;
+let stage: TileStage | undefined;
+let stageImage: ImageData | undefined;
+// Transparent where nothing is staged, so the upload composites over the preview.
+const uploadCanvas = document.createElement('canvas');
+const uploadContext = uploadCanvas.getContext('2d')!;
+
+/** Upload all tiles staged since the last frame with one putImageData and one drawImage. */
+function flushTiles(): void {
+  const region = stage?.pending();
+  if (!region || !stage || !stageImage || !surface) return;
+  uploadContext.putImageData(stageImage, 0, 0, region.x, region.y, region.width, region.height);
+  const destination = surface.canvas.getContext('2d')!;
+  destination.setTransform(1, 0, 0, 1, 0, 0);
+  destination.imageSmoothingEnabled = false;
+  destination.drawImage(uploadCanvas, region.x, region.y, region.width, region.height,
+    region.x, region.y, region.width, region.height);
+  stage.clear(region);
+}
 
 /** Reproject the last pixels immediately; high precision differences keep deep pans stable. */
 function project(target: CanvasRenderingContext2D, source: Surface, destination: View, width: number, height: number): void {
@@ -60,6 +77,7 @@ function draw(): void {
   frame = 0;
   // The label observer can fire before the canvas has a size (e.g. a hidden page).
   if (!view) return;
+  flushTiles();
   if (infoView !== view || infoWidth !== cssWidth || infoHeight !== cssHeight) {
     info = viewInfo(view, initialView(cssWidth, cssHeight).logScale);
     zoomLabel.textContent = info.zoom;
@@ -121,8 +139,15 @@ function startRender(): void {
     scheduleDraw();
     return;
   }
+  // Staged pixels belong to the outgoing surface and are part of the next preview.
+  flushTiles();
   const image = document.createElement('canvas');
   image.width = canvas.width; image.height = canvas.height;
+  if (stage?.width !== image.width || stage.height !== image.height) {
+    stage = new TileStage(image.width, image.height);
+    stageImage = new ImageData(stage.pixels, image.width, image.height);
+    uploadCanvas.width = image.width; uploadCanvas.height = image.height;
+  }
   const imageContext = image.getContext('2d', { alpha: false })!;
   imageContext.fillStyle = '#050914';
   imageContext.fillRect(0, 0, image.width, image.height);
@@ -190,6 +215,7 @@ function createWorker(): void {
       if (count === activeWorkerCount) {
         if (data.step === 8) coarseReady = true;
         if (data.step === 1) {
+          flushTiles();
           canvas.dataset.rendered = 'true';
           canvas.dataset.renderMs = String(Math.round(performance.now() - lastRender));
           canvas.setAttribute('aria-busy', 'false');
@@ -198,18 +224,8 @@ function createWorker(): void {
       }
       return;
     }
-    tileCanvas.width = data.width; tileCanvas.height = data.height;
-    tileContext.putImageData(new ImageData(data.pixels, data.width, data.height), 0, 0);
-    const destination = surface.canvas.getContext('2d')!;
-    destination.setTransform(1, 0, 0, 1, 0, 0);
-    destination.imageSmoothingEnabled = false;
     // Workers finish passes independently. A late coarse tile must never erase finer pixels.
-    const width = Math.min(surface.canvas.width - data.x, data.clipWidth ?? data.width * data.step);
-    const height = Math.min(surface.canvas.height - data.y, data.clipHeight ?? data.height * data.step);
-    for (const region of claimTile(quality, surface.canvas.width, { x: data.x, y: data.y, width, height }, data.step)) {
-      destination.drawImage(tileCanvas, (region.x - data.x) / data.step, (region.y - data.y) / data.step,
-        region.width / data.step, region.height / data.step, region.x, region.y, region.width, region.height);
-    }
+    for (const tile of data.tiles) stage!.add(tile, quality);
     scheduleDraw();
   };
   worker.onerror = event => {

@@ -86,8 +86,8 @@ function complexAt(view, x, y) {
 function near(a, b) { assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`); }
 
 function completeRegion(h, region) {
-  h.workers[0].emit({ type: 'tile', id: h.request().id, ...region, step: 1,
-    pixels: new Uint8ClampedArray(region.width * region.height * 4) });
+  h.workers[0].emit({ type: 'tiles', id: h.request().id, tiles: [{ ...region, step: 1,
+    pixels: new Uint8ClampedArray(region.width * region.height * 4) }] });
 }
 
 test('large renders expand the pool; narrow pans cancel surplus workers and finish with the active count', () => {
@@ -119,7 +119,8 @@ test('completed pixels survive a high-DPI pan, only exposed strips reach workers
   const copied = h.canvases.at(-1).draws[0];
   assert.deepEqual(copied, [source, 6, -4]);
   const draws = h.canvases.at(-1).draws.length;
-  h.workers[0].emit({ type: 'tile', id: previous.id, x: 0, y: 0, width: 10, height: 10, step: 8, pixels: new Uint8ClampedArray(400) });
+  h.workers[0].emit({ type: 'tiles', id: previous.id, tiles: [{ x: 0, y: 0, width: 10, height: 10, step: 8, pixels: new Uint8ClampedArray(400) }] });
+  h.flushFrames();
   assert.equal(h.canvases.at(-1).draws.length, draws);
   h.canvas.emit('pointerup', { pointerId: 1 }); h.flush();
   assert.equal(h.request().id, next.id, 'release must not restart an unchanged raster');
@@ -171,18 +172,22 @@ test('actual pointer handlers support pinch, single-finger continuation and capt
   assert.deepEqual(h.request().view, final);
 });
 
-test('outdated generations and late coarse tiles cannot erase completed fine pixels', () => {
+test('outdated generations are ignored; batched tiles reach the surface in one upload per frame', () => {
   const h = harness();
   const id = h.request().id;
   const image = h.canvases.at(-1);
-  const tile = { type: 'tile', id, x: 0, y: 0, width: 32, height: 32, step: 1, pixels: new Uint8ClampedArray(4096) };
-  h.workers[0].emit({ ...tile, id: id - 1 });
+  const tile = (x, y, step = 1) => ({ x, y, width: 32, height: 32, step, pixels: new Uint8ClampedArray(4096) });
+  h.workers[0].emit({ type: 'tiles', id: id - 1, tiles: [tile(0, 0)] });
+  h.flushFrames();
   assert.equal(image.draws.length, 0);
-  h.workers[0].emit(tile);
-  const fineCount = image.draws.length;
-  h.workers[1].emit({ ...tile, step: 8 });
-  assert.ok(image.draws.length > fineCount);
-  assert.ok(image.draws.slice(fineCount).every(args => args[5] !== 0 || args[6] !== 0));
+  h.workers[0].emit({ type: 'tiles', id, tiles: [tile(0, 0), tile(64, 0)] });
+  h.workers[1].emit({ type: 'tiles', id, tiles: [tile(32, 32)] });
+  assert.equal(image.draws.length, 0, 'tiles are staged, not drawn per message');
+  h.flushFrames();
+  assert.equal(image.draws.length, 1);
+  assert.deepEqual(image.draws[0].slice(1), [0, 0, 96, 64, 0, 0, 96, 64]);
+  h.flushFrames();
+  assert.equal(image.draws.length, 1, 'nothing is uploaded twice');
 });
 
 test('native physical resolution is rendered at fractional, Retina and higher pixel densities', () => {

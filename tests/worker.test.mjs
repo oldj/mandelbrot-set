@@ -18,7 +18,7 @@ function collect(worker, request) {
     worker.on('message', message => {
       if (message.id !== request.id) return;
       if (message.type === 'error') reject(new Error(message.message));
-      if (message.type === 'tile') tiles.push(message);
+      if (message.type === 'tiles') tiles.push(...message.tiles);
       if (message.type === 'pass' && message.step === 1) resolve(tiles);
     });
     worker.postMessage(request);
@@ -64,7 +64,7 @@ test('a new request cancels a costly reference job instead of waiting for its fr
   worker.postMessage({ type: 'cancel', id: 2 });
   const tiles = await collect(worker, { ...request, id: 3, view: initialView(32, 24), iterations: 1024 });
   assert.ok(tiles.length > 0);
-  assert.ok(messages.filter(message => message.type === 'tile').every(message => message.id === 3));
+  assert.ok(messages.filter(message => message.type === 'tiles').every(message => message.id === 3));
   assert.ok(!messages.some(message => message.type === 'error'));
 });
 

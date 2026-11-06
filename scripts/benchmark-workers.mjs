@@ -26,7 +26,7 @@ for (const count of counts.length ? counts : [4, 8]) {
         const receive = message => {
           if (message.id !== id) return;
           if (message.type === 'error') reject(new Error(message.message));
-          if (message.type === 'tile' && message.step === 1) for (const byte of message.pixels) sum += byte;
+          if (message.type === 'tiles') for (const tile of message.tiles) if (tile.step === 1) for (const byte of tile.pixels) sum += byte;
           if (message.type === 'pass' && message.step === 1) {
             worker.off('message', receive); worker.off('error', reject); resolve(sum);
           }
