@@ -43,6 +43,9 @@ export interface TileData {
   step: number;
   clipWidth?: number;
   clipHeight?: number;
+  /** Whether the tile ends at its region's right / bottom edge (its last samples stretch to it). */
+  edgeRight?: boolean;
+  edgeBottom?: boolean;
   pixels: Uint8ClampedArray<ArrayBuffer>;
 }
 

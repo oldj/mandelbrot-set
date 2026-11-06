@@ -386,3 +386,30 @@ test('a coarse pass that runs out of iterations re-renders with a raised budget'
   h.window.emit('keydown', { key: 'Home' });
   assert.equal(h.request().iterations, first.iterations);
 });
+
+test('after zooming, coarse passes do not repaint a sharper projected preview', () => {
+  const h = harness({ cores: 3 });
+  const finish = (id, steps) => {
+    for (const worker of h.workers.filter(worker => worker.messages.at(-1).id === id && !worker.messages.at(-1).type)) {
+      for (const step of steps) worker.emit({ type: 'pass', id, step, elapsed: 1, fallbacks: 0, samples: 100, unresolved: 0 });
+    }
+  };
+  finish(h.request().id, [8, 4, 2, 1]);
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 }); h.flush();
+  const zoomed = h.request(), image = h.canvases.at(-1);
+  const drawsBefore = image.draws.length;
+  const tile = (step, x = 64, y = 64) => ({ x, y, width: 32 / step, height: 32 / step, step, clipWidth: 32, clipHeight: 32,
+    edgeRight: false, edgeBottom: false, pixels: new Uint8ClampedArray((32 / step) ** 2 * 4) });
+  h.workers[0].emit({ type: 'tiles', id: zoomed.id, tiles: [tile(8), tile(4)] });
+  h.flushFrames();
+  assert.equal(image.draws.length, drawsBefore, 'step 8 and 4 blocks would be coarser than the preview');
+  h.workers[0].emit({ type: 'tiles', id: zoomed.id, tiles: [tile(2)] });
+  h.flushFrames();
+  assert.equal(image.draws.length, drawsBefore + 1, 'the 2-pixel and final passes still paint');
+  // Without a finished previous render there is no sharp preview to protect.
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 }); h.flush();
+  const next = h.request(), fresh = h.canvases.at(-1), before = fresh.draws.length;
+  h.workers[0].emit({ type: 'tiles', id: next.id, tiles: [tile(8)] });
+  h.flushFrames();
+  assert.equal(fresh.draws.length, before + 1);
+});

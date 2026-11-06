@@ -10,7 +10,7 @@ const CANCELLED = Symbol('cancelled');
 const FLUSH_MS = 16;
 /** Spatial tile size in physical pixels; a multiple of the coarsest step (8). */
 const TILE_SIZE = 32;
-interface OwnTile { x: number; y: number; width: number; height: number; previous?: Uint32Array; previousColumns: number }
+interface OwnTile { x: number; y: number; width: number; height: number; edgeRight: boolean; edgeBottom: boolean; previous?: Uint32Array; previousColumns: number }
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 /**
@@ -126,7 +126,8 @@ async function render(request: RenderRequest): Promise<void> {
     for (let tile = (workerIndex - tileOffset % workerCount + workerCount) % workerCount; tile < tilesX * tilesY; tile += workerCount) {
       const tx = (tile % tilesX) * TILE_SIZE, ty = Math.floor(tile / tilesX) * TILE_SIZE;
       tiles.push({ x: region.x + tx, y: region.y + ty, width: Math.min(TILE_SIZE, region.width - tx),
-        height: Math.min(TILE_SIZE, region.height - ty), previousColumns: 0 });
+        height: Math.min(TILE_SIZE, region.height - ty), previousColumns: 0,
+        edgeRight: tx + TILE_SIZE >= region.width, edgeBottom: ty + TILE_SIZE >= region.height });
     }
     tileOffset += tilesX * tilesY;
   }
@@ -163,7 +164,8 @@ async function render(request: RenderRequest): Promise<void> {
       // The pixel buffer is transferred below; keep a copy for the next pass.
       tile.previous = step > 1 ? words.slice() : undefined;
       tile.previousColumns = columns;
-      batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height, step, pixels });
+      batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height,
+        edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step, pixels });
       transfer.push(pixels.buffer);
       if (performance.now() - lastFlush >= FLUSH_MS) flush();
     }

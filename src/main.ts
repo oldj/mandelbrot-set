@@ -43,6 +43,8 @@ const passCounts = new Map<number, number>();
 /** Learned iteration budget, and the coarse-pass tally that adapts it. */
 let budgetMemory: BudgetMemory | undefined;
 let coarseSamples = 0, coarseUnresolved = 0;
+/** The finest pass every worker has finished for the current surface (255: none yet). */
+let completedStep = 255;
 const workers: Worker[] = [];
 const workerLimit = workerCapacity(navigator.hardwareConcurrency);
 let activeWorkerCount = 1;
@@ -103,6 +105,34 @@ function project(target: CanvasRenderingContext2D, source: Surface, destination:
   const y = height / 2 + offset.y - source.cssHeight * ratio / 2;
   if (![ratio, x, y].every(Number.isFinite) || ratio < 1e-6 || ratio > 1e6) return;
   target.drawImage(source.canvas, x, y, source.cssWidth * ratio, source.cssHeight * ratio);
+}
+
+/**
+ * Quality for a new surface whose preview is the projected old one. Zoomed in
+ * by a factor F, a surface finished to step s looks like samples F s pixels
+ * apart: coarser passes than that would replace the preview with a blockier
+ * image, then sharpen it again, so the grain would grow and shrink while
+ * zooming (sharp, blurry, sharp). Those
+ * passes still run (their statistics drive the budget); they just are not
+ * painted over the better preview. The final pass always paints.
+ */
+function projectedQuality(source: Surface | undefined, completed: number, width: number, height: number): Uint8Array<ArrayBuffer> {
+  const result = new Uint8Array(width * height).fill(255);
+  if (!source || source.cssWidth !== cssWidth || source.cssHeight !== cssHeight
+    || source.canvas.width !== width || source.canvas.height !== height) return result;
+  const ratio = 2 ** (source.view.logScale - view.logScale);
+  // At least 2: quality 1 means finished, which a pan would reuse as is. Zoomed
+  // out, the preview is sharper still but leaves the borders to the coarse passes.
+  const effective = Math.max(2, Math.floor(ratio * completed));
+  if (!Number.isFinite(ratio) || effective >= 255) return result;
+  // Where the projected old image lands, in physical pixels (inset by a pixel for its soft edge).
+  const offset = viewOffset(source.view, view), scaleX = width / cssWidth, scaleY = height / cssHeight;
+  const left = Math.max(0, Math.ceil((cssWidth / 2 + offset.x - source.cssWidth * ratio / 2) * scaleX) + 1);
+  const top = Math.max(0, Math.ceil((cssHeight / 2 + offset.y - source.cssHeight * ratio / 2) * scaleY) + 1);
+  const right = Math.min(width, Math.floor((cssWidth / 2 + offset.x + source.cssWidth * ratio / 2) * scaleX) - 1);
+  const bottom = Math.min(height, Math.floor((cssHeight / 2 + offset.y + source.cssHeight * ratio / 2) * scaleY) - 1);
+  for (let y = top; y < bottom; y++) result.fill(effective, y * width + left, y * width + right);
+  return result;
 }
 
 /** Reset is only offered once the view differs from the default one. */
@@ -203,11 +233,12 @@ function startRender(): void {
   } else {
     imageContext.setTransform(image.width / cssWidth, 0, 0, image.height / cssHeight, 0, 0);
     if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
-    quality = new Uint8Array(image.width * image.height).fill(255);
+    quality = projectedQuality(surface, completedStep, image.width, image.height);
   }
   const regions = pan ? missingRegions(quality, image.width, image.height)
     : [{ x: 0, y: 0, width: image.width, height: image.height }];
   surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations };
+  completedStep = 255;
   generation++;
   lastRender = performance.now();
   coarseReady = false;
@@ -275,6 +306,7 @@ function createWorker(): void {
       passCounts.set(data.step, count);
       if (data.step === 8) { coarseSamples += data.samples; coarseUnresolved += data.unresolved; }
       if (count === activeWorkerCount) {
+        completedStep = data.step;
         if (data.step === 8) {
           coarseReady = true;
           const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
