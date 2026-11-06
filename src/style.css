@@ -107,6 +107,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 .reference-link {
+  position: relative;
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -134,8 +135,12 @@ canvas.dragging { cursor: grabbing; }
 }
 .github-link svg { width: 22px; height: 22px; filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35)); }
 .github-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+/*
+ * A 44px touch target for the 28px link, without making the title row (and so
+ * the space between title and formula) taller than on other devices.
+ */
 @media (pointer: coarse) {
-  .reference-link { width: 44px; height: 44px; }
+  .reference-link::after { content: ""; position: absolute; inset: -8px; }
 }
 
 .site-formula {
