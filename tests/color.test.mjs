@@ -10,62 +10,58 @@ function rgb(value) {
   return [...pixel.slice(0, 3)];
 }
 
-test('each fixed 128-iteration window retains a full palette at every deep count', () => {
-  assert.equal(COLOR_PERIOD, 128);
-  for (const base of [512, 999.25, 16384, 65536, 2 ** 30, 2 ** 40]) {
+test('colours follow the animation at every depth it reaches', () => {
+  // Medians of flat (unblended) pixels over all 475 frames of
+  // Mandelbrot_sequence_new.gif, each frame at its fitted view, paired with
+  // the escape count there: from the first, shallow frame to the deepest.
+  for (const [value, expected] of [
+    [2.6, [14, 50, 149]], [7.8, [14, 63, 168]], [35.4, [73, 148, 217]], [62.4, [130, 203, 244]], [97, [189, 235, 254]],
+    [136.9, [237, 252, 254]], [243.3, [248, 231, 108]], [390, [247, 167, 9]], [663.1, [128, 29, 14]], [882.3, [36, 3, 45]],
+    [1270.9, [15, 66, 173]], [2011.7, [248, 252, 236]], [2955.2, [217, 109, 3]], [5962.2, [248, 251, 224]],
+    [7922.2, [148, 43, 9]], [10939.3, [144, 212, 248]], [16937, [14, 45, 140]], [25042.1, [26, 3, 52]],
+  ]) assert.ok(rgb(value).every((channel, i) => Math.abs(channel - expected[i]) <= 8), `${value}: ${rgb(value)} vs ${expected}`);
+});
+
+test('the generator\'s ten stops sit at evenly spaced laps of sqrt(n + 4) / 32', () => {
+  const stops = [[14, 11, 82], [14, 60, 165], [78, 154, 220], [176, 229, 255], [249, 253, 239], [249, 229, 96],
+    [249, 181, 15], [217, 108, 3], [134, 32, 13], [57, 4, 35]];
+  stops.forEach((expected, i) => {
+    for (const lap of [0, 1, 4]) {
+      const value = (32 * (lap + i / 10)) ** 2 - 4;
+      assert.ok(rgb(value).every((channel, c) => Math.abs(channel - expected[c]) <= 1), `stop ${i} lap ${lap}: ${rgb(value)}`);
+    }
+  });
+});
+
+test('beyond the animation, one lap repeats exactly every COLOR_PERIOD iterations', () => {
+  assert.equal(COLOR_PERIOD, 10240);
+  for (const base of [25596, 30000.5, 65536, 2 ** 30, 2 ** 40]) {
     assert.deepEqual(rgb(base + COLOR_PERIOD), rgb(base));
-    // Deliberately use a fixed-size local window rather than scaling the test
-    // window to COLOR_PERIOD: the previous 8576-period mapping hid this bug.
-    const colors = Array.from({ length: 256 }, (_, i) => rgb(base + i / 2));
-    assert.ok(new Set(colors.map(c => c.join(','))).size > 200);
-    assert.ok(colors.some(c => c.every(channel => channel > 225)));
-    assert.ok(colors.some(([r, g, b]) => r < 40 && g < 90 && b > 120));
-    assert.ok(colors.some(([r, g, b]) => r > 230 && g > 150 && b < 100));
-    const luminance = colors.map(([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b).sort((a, b) => a - b);
-    assert.ok(luminance[243] - luminance[12] > 160);
+    const lap = Array.from({ length: 1024 }, (_, i) => rgb(base + i * COLOR_PERIOD / 1024));
+    assert.ok(new Set(lap.map(c => c.join(','))).size > 600);
+    assert.ok(lap.some(c => c.every(channel => channel > 225)));
+    assert.ok(lap.some(([r, g, b]) => r < 40 && g < 90 && b > 120));
+    assert.ok(lap.some(([r, g, b]) => r > 230 && g > 150 && b < 100));
   }
   assert.deepEqual(rgb(INTERIOR), [0, 0, 0]);
 });
 
-test('smooth escape colors stay continuous across the cycle seam', () => {
-  // Includes the nonlinear-to-linear transition, all colour stops and wraps.
-  for (let value = 0.001; value < 512 + 2 * COLOR_PERIOD; value += 0.5) {
+test('smooth escape colours stay continuous across laps and where the lap length is fixed', () => {
+  for (let value = 0.001; value < 30000; value += value < 2000 ? 0.5 : 7.25) {
     const before = rgb(value - 0.001), after = rgb(value + 0.001);
-    assert.ok(before.every((channel, i) => Math.abs(channel - after[i]) <= 1));
+    assert.ok(before.every((channel, i) => Math.abs(channel - after[i]) <= 1), `at ${value}`);
   }
-});
-
-test('low-iteration hues match measured smooth areas in the supplied GIF', () => {
-  // Medians from frames 0–80. Tolerance covers GIF quantization, supersampling
-  // and small differences in viewport alignment; this is not a pixel clone.
-  for (const [value, expected] of [
-    [2, [14, 51, 149]], [8, [14, 63, 168]], [36, [74, 150, 218]],
-    [64, [132, 205, 244]], [100, [195, 235, 249]], [140, [240, 242, 233]],
-  ]) assert.ok(rgb(value).every((channel, i) => Math.abs(channel - expected[i]) <= 18));
-});
-
-test('golden palette retains neutral highlights and saturated warm bands', () => {
-  assert.deepEqual(rgb(140), [249, 253, 239]);
-  const cycle = Array.from({ length: 1024 }, (_, i) => rgb(512 + i / 8));
-  for (const expected of [[249, 229, 96], [249, 181, 15], [134, 32, 13], [14, 3, 65]]) {
-    assert.ok(cycle.some(pixel => pixel.every((channel, i) => Math.abs(channel - expected[i]) <= 3)));
-  }
+  const left = rgb(25596 - 0.01), right = rgb(25596 + 0.01);
+  assert.ok(left.every((channel, i) => Math.abs(channel - right[i]) <= 1));
 });
 
 test('negative smooth escape counts outside the set are not painted as interior', () => {
-  assert.deepEqual(rgb(-2), rgb(0));
-  assert.deepEqual(rgb(-0.25), rgb(0));
+  assert.deepEqual(rgb(-10), rgb(-4), 'counts below the lap start clamp to it');
+  assert.notDeepEqual(rgb(-2), rgb(INTERIOR));
   assert.notDeepEqual(rgb(0), rgb(INTERIOR));
 });
 
-test('transition joins do not introduce abrupt color jumps', () => {
-  for (const boundary of [144, 512]) {
-    const left = rgb(boundary - 0.0001), right = rgb(boundary + 0.0001);
-    assert.ok(left.every((channel, i) => Math.abs(channel - right[i]) <= 1));
-  }
-});
-
-test('reported 1.50e47 view spans bright, blue and golden bands rather than one hue', async () => {
+test('reported 1.50e47 view follows the animation scheme: blues of its second lap', async () => {
   const initial = initialView(1280, 800);
   const view = ensurePrecision({ ...initial, logScale: initial.logScale - Math.log2(1.5e47) });
   // Parse the supplied decimal strings without losing digits through Number.
@@ -82,11 +78,16 @@ test('reported 1.50e47 view spans bright, blue and golden bands rather than one 
     assert.ok(value > 0, 'these points escape within the existing iteration budget');
     colors.push(rgb(value));
   }
-  assert.ok(new Set(colors.map(c => c.join(','))).size > 100);
-  const luminance = colors.map(([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b).sort((a, b) => a - b);
-  assert.ok(luminance.at(-1) - luminance[0] > 180);
-  assert.ok(luminance[Math.floor(luminance.length * 0.9)] - luminance[Math.floor(luminance.length * 0.1)] > 100);
-  assert.ok(colors.some(c => c.every(channel => channel > 200)));
-  assert.ok(colors.some(([r, g, b]) => r < 70 && b > 120));
-  assert.ok(colors.some(([r, g, b]) => r > 220 && g > 150 && b < 120));
+  // Counts here (~1360-1490) lie early in the second lap: royal to light blue, never warm.
+  assert.ok(colors.every(([r, g, b]) => b > r && b >= 150));
+  assert.ok(new Set(colors.map(c => c.join(','))).size > 20);
+});
+
+test('shallow blues match flat areas of the first frame of the sequence', () => {
+  // Medians of pixels whose 4x4 sub-samples agree (no blending) in the
+  // 320x240 first frame, paired with escape counts at its fitted view.
+  for (const [value, expected] of [
+    [2.77, [14, 51, 150]], [4.47, [13, 56, 158]], [6.43, [14, 61, 165]], [8.43, [14, 64, 169]],
+    [10.69, [13, 67, 173]], [12.7, [16, 72, 178]], [14.74, [21, 79, 182]],
+  ]) assert.ok(rgb(value).every((channel, i) => Math.abs(channel - expected[i]) <= 5), `${value}: ${rgb(value)} vs ${expected}`);
 });
