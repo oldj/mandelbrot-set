@@ -1,67 +1,51 @@
-import type { RenderRequest, RenderStrip } from './types';
+import { color, createSampler } from './fractal.ts';
+import type { ReferenceCache } from './fractal';
+import type { RenderMessage, RenderRequest } from './types';
 
-const MAX_ITERATIONS = 800;
-const PALETTE = [
-  [7, 15, 35],
-  [18, 45, 94],
-  [34, 100, 163],
-  [105, 181, 210],
-  [223, 236, 222],
-  [244, 186, 91],
-  [171, 83, 40],
-  [35, 24, 44],
-];
+let generation = 0;
+const referenceCache: ReferenceCache = {};
+const CANCELLED = Symbol('cancelled');
+const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
-self.onmessage = ({ data }: MessageEvent<RenderRequest>): void => {
-  const { width, height } = data;
-  // A uniform scale preserves the geometry and fits the whole set in any aspect ratio.
-  const scale = Math.max(3.4 / width, 2.7 / height);
-  for (let y = 0; y < height; y += 32) {
-    const stripHeight = Math.min(32, height - y);
-    const pixels = new Uint8ClampedArray(width * stripHeight * 4);
-    for (let row = 0; row < stripHeight; row++) {
-      const ci = (height / 2 - (y + row + 0.5)) * scale;
-      for (let x = 0; x < width; x++) {
-        const cr = -0.6 + (x + 0.5 - width / 2) * scale;
-        const offset = (row * width + x) * 4;
-        const q = (cr - 0.25) ** 2 + ci * ci;
-        // The main cardioid and period-two bulb are known to be inside the set.
-        const inside = q * (q + cr - 0.25) <= 0.25 * ci * ci || (cr + 1) ** 2 + ci * ci <= 1 / 16;
-        let zr = 0;
-        let zi = 0;
-        let zr2 = 0;
-        let zi2 = 0;
-        let iteration = 0;
-        if (!inside) {
-          while (zr2 + zi2 <= 256 && iteration < MAX_ITERATIONS) {
-            zi = 2 * zr * zi + ci;
-            zr = zr2 - zi2 + cr;
-            zr2 = zr * zr;
-            zi2 = zi * zi;
-            iteration++;
-          }
-        }
-
-        if (inside || iteration === MAX_ITERATIONS) {
-          pixels[offset] = 3;
-          pixels[offset + 1] = 5;
-          pixels[offset + 2] = 10;
-        } else {
-          // Continuous escape-time coloring removes discrete iteration bands.
-          const smooth = iteration + 1 - Math.log2(Math.log2(Math.sqrt(zr2 + zi2)));
-          const position = Math.log2(1 + Math.max(0, smooth)) * 2.2;
-          const index = Math.floor(position);
-          const blend = position - index;
-          const from = PALETTE[index % PALETTE.length];
-          const to = PALETTE[(index + 1) % PALETTE.length];
-          for (let channel = 0; channel < 3; channel++) {
-            pixels[offset + channel] = from[channel] + (to[channel] - from[channel]) * blend;
-          }
-        }
-        pixels[offset + 3] = 255;
-      }
-    }
-    const strip: RenderStrip = { y, height: stripHeight, pixels, done: y + stripHeight === height };
-    self.postMessage(strip, { transfer: [pixels.buffer] });
-  }
+self.onmessage = ({ data }: MessageEvent<RenderRequest>) => {
+  generation = data.id;
+  void render(data).catch(error => {
+    if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
+  });
 };
+
+async function render(request: RenderRequest): Promise<void> {
+  const started = performance.now();
+  let lastYield = started;
+  const checkpoint = async () => {
+    if (generation !== request.id) throw CANCELLED;
+    if (performance.now() - lastYield < 8) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    lastYield = performance.now();
+    if (generation !== request.id) throw CANCELLED;
+  };
+  const { id, view, width, height, cssWidth, cssHeight, workerIndex, workerCount, iterations } = request;
+  const sampler = await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache);
+  // All passes sample the same world rectangle. Coarse pixels are replaced, not stretched forever.
+  for (const step of [8, 4, 2, 1]) {
+    const columns = Math.ceil(width / step), rows = Math.ceil(height / step);
+    const tileSize = 32;
+    const tilesX = Math.ceil(columns / tileSize), tilesY = Math.ceil(rows / tileSize);
+    for (let tile = workerIndex; tile < tilesX * tilesY; tile += workerCount) {
+      await checkpoint();
+      const tx = (tile % tilesX) * tileSize, ty = Math.floor(tile / tilesX) * tileSize;
+      const w = Math.min(tileSize, columns - tx), h = Math.min(tileSize, rows - ty);
+      const pixels = new Uint8ClampedArray(w * h * 4);
+      for (let row = 0; row < h; row++) {
+        for (let col = 0; col < w; col++) {
+          const x = Math.min(width - 0.5, (tx + col + 0.5) * step) / width * cssWidth - cssWidth / 2;
+          const y = Math.min(height - 0.5, (ty + row + 0.5) * step) / height * cssHeight - cssHeight / 2;
+          color(sampler.sample(x, y), pixels, (row * w + col) * 4);
+        }
+        await checkpoint();
+      }
+      send({ type: 'tile', id, x: tx * step, y: ty * step, width: w, height: h, step, pixels }, [pixels.buffer]);
+    }
+    send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler.stats.fallbacks });
+  }
+}

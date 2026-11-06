@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 59472 --strictPort",
     "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "typescript": "~5.9.3",
     "vite": "^7.2.2"
   }
