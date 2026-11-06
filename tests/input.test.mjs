@@ -396,6 +396,91 @@ test('reset is hidden at the default view and appears once the view changes', ()
   assert.equal(reset.hidden, false, 'panning alone also offers reset');
 });
 
+test('a draft that leaves a few pixels unresolved is finished first, then deepened in place', () => {
+  const h = harness({ cores: 3 });
+  const first = h.request();
+  const active = h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type);
+  const pixels = Number(h.canvas.dataset.computePixels);
+  // 5% of coarse samples run out: no restart, the full-resolution draft goes on.
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 50 });
+  assert.equal(h.request().id, first.id, 'a mostly resolved coarse pass does not restart');
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 1, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 10,
+    pending: Math.ceil(pixels * 0.05 / active.length) });
+  // The draft is done; the unresolved pixels of the same render are deepened at 4x the budget.
+  const deepen = h.request();
+  assert.equal(deepen.id, first.id);
+  assert.equal(deepen.deepen, true);
+  assert.equal(deepen.iterations, first.iterations * 4);
+  assert.ok(active.every(worker => worker.messages.at(-1).deepen), 'every active worker deepens its own pixels');
+  assert.equal(h.canvas.dataset.rendered, 'false');
+  assert.equal(h.canvas.dataset.iterations, String(first.iterations), 'the surface keeps its budget until deepening completes');
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 1, deepen: true, elapsed: 1, fallbacks: 0, samples: 10, unresolved: 0, pending: 0 });
+  assert.equal(h.canvas.dataset.rendered, 'true');
+  assert.equal(h.canvas.dataset.iterations, String(first.iterations * 4));
+  // The learned budget carries on to the next render nearby.
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 });
+  h.flush();
+  assert.equal(h.request().iterations, first.iterations * 4);
+});
+
+/** Report every pass of the latest request from its active workers, with `pending` unresolved pixels in all. */
+function finishRequest(h, { coarseUnresolved = 0, pending = 0 } = {}) {
+  const request = h.request();
+  const active = h.workers.filter(worker => worker.messages.at(-1).id === request.id && !worker.messages.at(-1).type);
+  active.forEach((worker, i) => {
+    for (const step of [8, 4, 2]) worker.emit({ type: 'pass', id: request.id, step, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: step === 8 ? coarseUnresolved : 0 });
+    worker.emit({ type: 'pass', id: request.id, step: 1, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 0,
+      pending: Math.floor(pending / active.length) + (i < pending % active.length ? 1 : 0) });
+  });
+  return request;
+}
+
+test('after a pan, unresolved pixels lead to a full render instead of deepening only the new strips', () => {
+  const h = harness({ width: 100, height: 80 });
+  completeRegion(h, { x: 0, y: 0, width: 100, height: 80 });
+  const first = finishRequest(h);
+  assert.equal(h.canvas.dataset.rendered, 'true');
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 20, clientY: 20 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 23, clientY: 18 }); h.flush();
+  const pan = h.request();
+  assert.ok(pan.regions.length && Number(h.canvas.dataset.reusedPixels) > 0, 'the pan reuses pixels');
+  // The new strips leave pixels unresolved: the reused ones may hold more, at the old budget.
+  finishRequest(h, { pending: 100 });
+  const next = h.request();
+  assert.ok(next.id > pan.id && !next.deepen, 'a new render, not a deepening');
+  assert.equal(next.iterations, first.iterations * 4);
+  assert.equal(Number(h.canvas.dataset.computePixels), 100 * 80, 'nothing reused from the lower budget');
+});
+
+test('deepening that needs a longer reference than the workers can share renders again with fewer workers', () => {
+  // Below 2^-800 each worker's reference tables take ~768 bytes per iteration: at 4x the budget fewer workers fit.
+  const h = harness({ cores: 9, hash: '#re=-1.75&im=0&zoom=1e300' });
+  const first = h.request();
+  assert.ok(first.reference && first.workerCount > 1, `a deep render with ${first.workerCount} workers`);
+  finishRequest(h, { coarseUnresolved: 10, pending: Math.ceil(Number(h.canvas.dataset.computePixels) * 0.02) });
+  const next = h.request();
+  assert.ok(next.id > first.id && !next.deepen, 'a new render, not a deepening');
+  assert.equal(next.iterations, first.iterations * 4);
+  assert.ok(next.workerCount < first.workerCount, `${next.workerCount} workers`);
+});
+
+test('a deepening is abandoned when the view changes', () => {
+  const h = harness({ cores: 3 });
+  const first = h.request();
+  const active = h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type);
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 20 });
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 1, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 0, pending: 5000 });
+  assert.equal(h.request().deepen, true);
+  h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: -100, deltaMode: 0 });
+  h.flush();
+  const next = h.request();
+  assert.ok(next.id > first.id && !next.deepen);
+  // Late reports of the old deepening change nothing.
+  for (const worker of active) worker.emit({ type: 'pass', id: first.id, step: 1, deepen: true, elapsed: 1, fallbacks: 0, samples: 10, unresolved: 0, pending: 0 });
+  assert.equal(h.canvas.dataset.rendered, 'false');
+  assert.equal(h.request().id, next.id);
+});
+
 test('a coarse pass that runs out of iterations re-renders with a raised budget', () => {
   const h = harness({ cores: 3 });
   const first = h.request();

@@ -220,3 +220,54 @@ test('outlines use each pixel\'s distance estimate in physical pixels, the same 
   assert.equal(checked, width * height);
   assert.ok(shaded > checked / 10, `outlines change part of this view (${shaded} of ${checked})`);
 });
+
+/** All messages of one request up to its final pass (or deepening): the tiles and that pass. */
+function run(worker, request) {
+  return new Promise((resolve, reject) => {
+    const tiles = [];
+    const receive = message => {
+      if (message.id !== request.id) return;
+      if (message.type === 'error') reject(new Error(message.message));
+      if (message.type === 'tiles') tiles.push(...message.tiles);
+      if (message.type === 'pass' && message.step === 1 && Boolean(message.deepen) === Boolean(request.deepen)) {
+        worker.off('message', receive);
+        resolve({ tiles, pass: message });
+      }
+    };
+    worker.on('message', receive);
+    worker.postMessage(request);
+  });
+}
+/** Paint final (step 1) tiles in arrival order into one image of packed RGBA words. */
+function paint(image, width, tiles) {
+  for (const tile of tiles.filter(tile => tile.step === 1)) {
+    const words = new Uint32Array(tile.pixels.buffer, tile.pixels.byteOffset, tile.width * tile.height);
+    for (let row = 0; row < tile.height; row++) image.set(words.subarray(row * tile.width, (row + 1) * tile.width), (tile.y + row) * width + tile.x);
+  }
+  return image;
+}
+
+test('deepening resamples only unresolved pixels and ends identical to rendering at the deeper budget', async t => {
+  const { parseViewHash } = await import('../src/ui/url-state.ts');
+  for (const [hash, low, high] of [
+    ['#re=-0.62665817544438&im=0.39074560013374&zoom=1.835504281e8', 8192, 32768], // shallow, near the 13/30 root
+    ['#re=-0.730883269553203772&im=0.247817380961806007&zoom=1.827554774e12', 2560, 10240], // perturbation
+  ]) {
+    const width = 40, height = 25, view = parseViewHash(hash, initialView(width, height).logScale);
+    const base = { view, width, height, cssWidth: width, cssHeight: height, workerIndex: 0, workerCount: 1 };
+    const worker = startWorker(t), fresh = startWorker(t);
+    const draft = await run(worker, { ...base, id: 1, iterations: low });
+    assert.ok(draft.pass.pending > 0, 'the draft leaves pixels unresolved');
+    const deepened = await run(worker, { ...base, id: 1, iterations: high, deepen: true });
+    assert.equal(deepened.pass.samples, draft.pass.pending, 'only the unresolved pixels are sampled again');
+    assert.ok(deepened.pass.pending < draft.pass.pending, `${deepened.pass.pending} of ${draft.pass.pending} still unresolved`);
+    const image = paint(paint(new Uint32Array(width * height), width, draft.tiles), width, deepened.tiles);
+    const direct = paint(new Uint32Array(width * height), width, (await run(fresh, { ...base, id: 1, iterations: high })).tiles);
+    assert.deepEqual(image, direct);
+    // A deepening for a render that is no longer the latest does nothing.
+    await run(worker, { ...base, id: 2, iterations: low });
+    const stale = await run(worker, { ...base, id: 1, iterations: high, deepen: true });
+    assert.equal(stale.pass.samples, 0);
+    assert.equal(stale.tiles.length, 0);
+  }
+});

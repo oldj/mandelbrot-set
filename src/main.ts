@@ -36,6 +36,20 @@ const passCounts = new Map<number, number>();
 /** Learned iteration budget, and the coarse-pass tally that adapts it. */
 let budgetMemory: BudgetMemory | undefined;
 let coarseSamples = 0, coarseUnresolved = 0;
+/**
+ * A render first finishes at its budget, a full-resolution draft; pixels
+ * that ran out of iterations are then deepened at a raised budget, only
+ * those, as often as adaptBudget asks. Only when more than DRAFT_LIMIT of the
+ * coarse samples run out does the budget rise before any full-resolution
+ * work: such a draft would be mostly placeholders.
+ */
+const DRAFT_LIMIT = 0.25;
+/** Unresolved final pixels reported for the current draft or deepening, and how many workers reported. */
+let pendingPixels = 0, deepenReports = 0;
+/** The budget the running deepening samples at (0: none), and the request it extends. */
+let deepenIterations = 0;
+let renderBase: Omit<RenderRequest, 'workerIndex' | 'reference'> | undefined;
+let renderPixelCount = 0;
 /** The finest pass every worker has finished for the current surface (255: none yet). */
 let completedStep = 255;
 const workers: Worker[] = [];
@@ -203,6 +217,7 @@ function startRender(): void {
   coarseReady = false;
   passCounts.clear();
   coarseSamples = coarseUnresolved = 0;
+  pendingPixels = deepenReports = deepenIterations = 0;
   canvas.dataset.rendered = 'false';
   canvas.setAttribute('aria-busy', 'true');
   canvas.dataset.precisionBits = String(view.bits);
@@ -211,18 +226,20 @@ function startRender(): void {
   const renderPixels = regions.reduce((sum, region) => sum + region.width * region.height, 0);
   canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
   canvas.dataset.computePixels = String(renderPixels);
+  renderPixelCount = renderPixels;
   activeWorkerCount = renderWorkerCount(workerLimit, renderPixels, view.logScale, iterations);
   canvas.dataset.workers = String(activeWorkerCount);
   while (workers.length < activeWorkerCount) createWorker();
   const shared = renderPixels ? planReference(surface.view, iterations) : undefined;
   canvas.dataset.referenceKey = shared ? String(shared.key) : '';
+  renderBase = { id: generation, view: surface.view, width: image.width, height: image.height,
+    cssWidth, cssHeight, workerCount: activeWorkerCount, iterations, regions };
   workers.forEach((worker, workerIndex) => {
     if (workerIndex >= activeWorkerCount) {
       worker.postMessage({ type: 'cancel', id: generation });
       return;
     }
-    worker.postMessage({ id: generation, view: surface!.view, width: image.width, height: image.height,
-      cssWidth, cssHeight, workerIndex, workerCount: activeWorkerCount, iterations, regions,
+    worker.postMessage({ ...renderBase!, workerIndex,
       reference: shared && referencePlan(shared, workerIndex) } satisfies RenderRequest);
   });
   scheduleDraw();
@@ -263,6 +280,43 @@ function changed(): void {
   else renderTimer = setTimeout(startRender, SETTLE_MS);
 }
 
+/**
+ * The draft (or a deepening) is complete with `pendingPixels` unresolved:
+ * deepen those at a raised budget if adaptBudget asks for it, else finish.
+ */
+function settle(): void {
+  flushTiles();
+  const adapted = adaptBudget(budgetMemory, surface!.view.logScale, surface!.iterations, renderPixelCount, pendingPixels);
+  budgetMemory = adapted.memory;
+  if (adapted.raise && renderBase) {
+    const iterations = adapted.memory!.iterations;
+    // Deepening covers only the pixels this render computed, with its workers.
+    // After a pan, reused pixels keep the old budget's unresolved ones, and a
+    // longer reference may call for fewer workers (each holds its tables): in
+    // both cases render the whole surface again at the raised budget instead.
+    const whole = renderPixelCount === surface!.canvas.width * surface!.canvas.height;
+    if (!whole || renderWorkerCount(workerLimit, renderPixelCount, renderBase.view.logScale, iterations) < activeWorkerCount) {
+      startRender();
+      return;
+    }
+    deepenIterations = iterations;
+    pendingPixels = deepenReports = 0;
+    canvas.dataset.deepening = String(deepenIterations);
+    const shared = planReference(renderBase.view, deepenIterations);
+    workers.forEach((worker, workerIndex) => {
+      if (workerIndex >= activeWorkerCount) return;
+      worker.postMessage({ ...renderBase!, workerIndex, iterations: deepenIterations, deepen: true,
+        reference: shared && referencePlan(shared, workerIndex) } satisfies RenderRequest);
+    });
+    return;
+  }
+  canvas.dataset.deepening = '';
+  canvas.dataset.rendered = 'true';
+  canvas.dataset.renderMs = String(Math.round(performance.now() - lastRender));
+  canvas.setAttribute('aria-busy', 'false');
+  canvas.title = '';
+}
+
 function createWorker(): void {
   const worker = new Worker(new URL('./render/worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }: MessageEvent<RenderMessage>) => {
@@ -288,24 +342,33 @@ function createWorker(): void {
       return;
     }
     if (data.type === 'pass') {
+      if (data.deepen) {
+        if (!deepenIterations) return;
+        pendingPixels += data.pending ?? 0;
+        if (++deepenReports === activeWorkerCount) {
+          // The surface now holds the deeper budget's pixels throughout (resolved ones never depended on it).
+          surface.iterations = deepenIterations;
+          canvas.dataset.iterations = String(deepenIterations);
+          deepenIterations = 0;
+          settle();
+        }
+        return;
+      }
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
       if (data.step === 8) { coarseSamples += data.samples; coarseUnresolved += data.unresolved; }
+      if (data.step === 1) pendingPixels += data.pending ?? 0;
       if (count === activeWorkerCount) {
         completedStep = data.step;
         if (data.step === 8) {
           coarseReady = true;
-          const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
-          budgetMemory = adapted.memory;
-          if (adapted.raise) { startRender(); return; }
+          if (coarseSamples && coarseUnresolved / coarseSamples > DRAFT_LIMIT) {
+            const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
+            budgetMemory = adapted.memory;
+            if (adapted.raise) { startRender(); return; }
+          }
         }
-        if (data.step === 1) {
-          flushTiles();
-          canvas.dataset.rendered = 'true';
-          canvas.dataset.renderMs = String(Math.round(performance.now() - lastRender));
-          canvas.setAttribute('aria-busy', 'false');
-          canvas.title = '';
-        }
+        if (data.step === 1) settle();
       }
       return;
     }

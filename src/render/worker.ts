@@ -4,8 +4,13 @@
  * shading each pixel by its escape count and distance estimate. Deep views
  * share one reference orbit: worker 0 computes it, the main thread forwards it.
  * Work yields every ~8 ms, so newer requests cancel older ones promptly.
+ *
+ * Pixels that reach the budget unresolved are remembered per tile. A later
+ * `deepen` request for the same render resamples just those at a larger
+ * budget, so the main thread can show the finished draft first and raise the
+ * budget only where it is needed.
  */
-import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, referenceFromOrbit } from '../fractal/index.ts';
+import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, referenceFromOrbit } from '../fractal/index.ts';
 import { shadedWord } from './palette.ts';
 import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
@@ -18,7 +23,14 @@ const CANCELLED = Symbol('cancelled');
 const FLUSH_MS = 16;
 /** Spatial tile size in physical pixels; a multiple of the coarsest step (8). */
 const TILE_SIZE = 32;
-interface OwnTile { x: number; y: number; width: number; height: number; edgeRight: boolean; edgeBottom: boolean; previous?: Uint32Array; previousColumns: number }
+interface OwnTile {
+  x: number; y: number; width: number; height: number; edgeRight: boolean; edgeBottom: boolean;
+  previous?: Uint32Array; previousColumns: number;
+  /** 1 for final pixels that reached the budget unresolved (allocated on the first one), and the tile's final words. */
+  pending?: Uint8Array; final?: Uint32Array;
+}
+/** The last finished render: its request and the tiles that still have unresolved pixels. */
+let finished: { request: RenderRequest; tiles: OwnTile[] } | undefined;
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 /**
@@ -51,7 +63,7 @@ self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
   wantedKey = 'type' in data ? undefined : data.reference?.key;
   if (waiting && waiting.key !== wantedKey) { waiting.reject(CANCELLED); waiting = undefined; }
   if ('type' in data) return;
-  void render(data).catch(error => {
+  void (data.deepen ? deepen(data) : render(data)).catch(error => {
     if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
   });
 };
@@ -141,7 +153,8 @@ async function render(request: RenderRequest): Promise<void> {
   }
   const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
   const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
-  const targets = new Int32Array(TILE_SIZE);
+  const targets = new Int32Array(TILE_SIZE), unresolved = new Uint8Array(TILE_SIZE);
+  if (finished?.request.id !== id) finished = undefined;
   // Distance estimates come in CSS pixels; outlines are measured in physical
   // ones, the same in every pass, so coarse previews match the final image.
   const physical = width / cssWidth;
@@ -166,15 +179,19 @@ async function render(request: RenderRequest): Promise<void> {
           for (let col = 0; col < columns; col += 2) words[row * columns + col] = previous[(row >> 1) * previousColumns + (col >> 1)];
         }
         if (count) {
-          if (sampler!.row) sampler!.row(xs, count, y, values, distances);
-          else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); }
-          for (let k = 0; k < count; k++) words[row * columns + targets[k]] = shadedWord(values[k], distances[k] * physical);
+          if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
+          else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
+          for (let k = 0; k < count; k++) {
+            words[row * columns + targets[k]] = shadedWord(values[k], distances[k] * physical);
+            if (unresolved[k]) (tile.pending ??= new Uint8Array(tile.width * tile.height))[row * step * tile.width + targets[k] * step] = 1;
+          }
         }
         samples += count;
         await checkpoint();
       }
-      // The pixel buffer is transferred below; keep a copy for the next pass.
+      // The pixel buffer is transferred below; keep a copy for the next pass, or for deepening.
       tile.previous = step > 1 ? words.slice() : undefined;
+      if (step === 1 && tile.pending) tile.final = words.slice();
       tile.previousColumns = columns;
       batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height,
         edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step, pixels });
@@ -183,7 +200,80 @@ async function render(request: RenderRequest): Promise<void> {
     }
     await checkpoint();
     flush();
+    if (step === 1) finished = { request, tiles: tiles.filter(tile => tile.pending) };
     send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
-      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore });
+      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore,
+      pending: step === 1 ? countPending(finished!.tiles) : undefined });
   }
+}
+
+function countPending(tiles: OwnTile[]): number {
+  let total = 0;
+  for (const tile of tiles) for (const flag of tile.pending!) total += flag;
+  return total;
+}
+
+/**
+ * Resample the unresolved pixels of the finished render `request.id` at the
+ * larger `request.iterations`, and send each changed tile again (at step 1,
+ * so it replaces the old one). Samples are exactly those of a fresh render at
+ * that budget, so the result matches rendering it directly.
+ */
+async function deepen(request: RenderRequest): Promise<void> {
+  const started = performance.now();
+  let lastYield = started;
+  const checkpoint = async () => {
+    if (generation !== request.id) throw CANCELLED;
+    if (performance.now() - lastYield < 8) return;
+    await yieldToEvents();
+    lastYield = performance.now();
+    if (generation !== request.id) throw CANCELLED;
+  };
+  const { id, view, width, height, cssWidth, cssHeight, iterations, reference } = request;
+  const tiles = finished?.request.id === id ? finished.tiles : [];
+  const source = reference && (() => sharedReference(reference));
+  // Worker 0 builds a longer shared orbit even without pixels of its own to deepen: the others wait for it.
+  const sampler = tiles.length || reference?.build
+    ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
+  const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
+  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
+  const targets = new Int32Array(TILE_SIZE), unresolved = new Uint8Array(TILE_SIZE), physical = width / cssWidth;
+  let batch: TileData[] = [], transfer: ArrayBuffer[] = [], lastFlush = started, samples = 0;
+  const flush = () => {
+    if (batch.length) send({ type: 'tiles', id, tiles: batch }, transfer);
+    batch = []; transfer = []; lastFlush = performance.now();
+  };
+  for (const tile of tiles) {
+    await checkpoint();
+    const pending = tile.pending!, words = tile.final!;
+    for (let row = 0; row < tile.height; row++) {
+      let count = 0;
+      for (let col = 0; col < tile.width; col++) {
+        if (!pending[row * tile.width + col]) continue;
+        targets[count] = col;
+        xs[count++] = toCss(tile.x + col, width, cssWidth);
+      }
+      if (!count) continue;
+      const y = toCss(tile.y + row, height, cssHeight);
+      if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
+      else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
+      for (let k = 0; k < count; k++) {
+        words[row * tile.width + targets[k]] = shadedWord(values[k], distances[k] * physical);
+        pending[row * tile.width + targets[k]] = unresolved[k];
+      }
+      samples += count;
+      await checkpoint();
+    }
+    const pixels = new Uint8ClampedArray(words.slice().buffer);
+    batch.push({ x: tile.x, y: tile.y, width: tile.width, height: tile.height, clipWidth: tile.width, clipHeight: tile.height,
+      edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step: 1, pixels });
+    transfer.push(pixels.buffer);
+    if (performance.now() - lastFlush >= FLUSH_MS) flush();
+  }
+  await checkpoint();
+  flush();
+  const left = tiles.filter(tile => tile.pending!.some(flag => flag));
+  if (finished?.request.id === id) finished = { request: { ...request, deepen: undefined }, tiles: left };
+  send({ type: 'pass', id, step: 1, deepen: true, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
+    samples, unresolved: sampler?.stats.unresolved ?? 0, pending: countPending(left) });
 }

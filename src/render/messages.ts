@@ -37,6 +37,11 @@ export interface RenderRequest {
   iterations: number;
   regions?: RenderRegion[];
   reference?: ReferencePlan;
+  /**
+   * Resample only the pixels the finished render `id` left unresolved, at
+   * `iterations` (more than before), and send their tiles again.
+   */
+  deepen?: boolean;
 }
 
 /** One finished tile; `step` is the sample spacing in physical pixels. */
@@ -70,6 +75,10 @@ export interface RenderProgress {
   /** Samples this worker computed in the pass, and how many reached the budget unresolved. */
   samples: number;
   unresolved: number;
+  /** After the final pass or a deepening: this worker's final pixels still unresolved. */
+  pending?: number;
+  /** Progress of a `deepen` request rather than of a pass. */
+  deepen?: boolean;
 }
 
 /** Worker -> main thread: the orbit a `build` plan produced. */
