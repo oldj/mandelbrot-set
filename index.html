@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- analytics: Google Tag Manager, production only (the dev server removes this block, see vite.config.ts) -->
+    <script async src="https://www.googletagmanager.com/gtm.js?id=GTM-P5ZMMT26"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+    </script>
+    <!-- /analytics -->
     <meta name="theme-color" content="#050914" />
     <meta name="description" content="Explore the Mandelbrot set in your browser, rendered live from the full view down to extreme deep zooms." />
     <title>Mandelbrot Set</title>

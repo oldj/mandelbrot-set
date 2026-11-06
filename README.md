@@ -190,7 +190,8 @@ npm run preview
 ## 代码结构
 
 ```text
-index.html               页面骨架（信息面板、对话框）
+index.html               页面骨架（信息面板、对话框）与 Google Tag Manager 统计代码
+vite.config.ts           开发服务器去掉统计代码，只有构建出的正式站点才加载
 public/                  站点图标（由 npm run icons 用 scripts/favicon.mjs 生成）
 src/
   main.ts                应用入口：画布与视图、输入（滚轮、拖拽、双指、Home、URL hash）、渲染调度
