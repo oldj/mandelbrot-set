@@ -23,6 +23,11 @@ export function smooth(iteration: number, logRadius: number): number {
  * which stays within double range at any depth, and at escape
  * |z| ln|z| / |z'| is the distance to the set within a factor of about 2.
  */
-export const lastSample = { distance: NaN };
+export const lastSample = { distance: NaN, unresolved: false };
 export function lastDistance(): number { return lastSample.distance; }
+/**
+ * Whether the most recent sample is INTERIOR only because it reached the
+ * budget (neither escaped nor proved interior): a larger budget may resolve it.
+ */
+export function lastUnresolved(): boolean { return lastSample.unresolved; }
 export const escapeDistance = (squared: number, dr: number, di: number) => Math.sqrt(squared) * 0.5 * Math.log(squared) / Math.hypot(dr, di);

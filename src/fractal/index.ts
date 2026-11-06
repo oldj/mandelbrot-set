@@ -9,7 +9,7 @@
  *   sampler.ts       per-view sampler choosing among all of the above
  *   reference.ts     planning references: where, how deep, when one can be reused
  */
-export { INTERIOR, iterationBudget, lastDistance } from './escape.ts';
+export { INTERIOR, iterationBudget, lastDistance, lastUnresolved } from './escape.ts';
 export { directDouble, directFixed, directRow, insideFixed } from './direct.ts';
 export { buildReference, computeOrbit, EXTENDED_LOG_SCALE, referenceFromOrbit } from './orbit.ts';
 export type { Checkpoint, Reference } from './orbit.ts';

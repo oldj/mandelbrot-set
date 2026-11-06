@@ -18,8 +18,12 @@ import type { ReferenceSpec } from './reference.ts';
 /** Samples one view at CSS-pixel offsets from its centre; lastDistance() holds each sample's distance estimate. */
 export interface Sampler {
   sample(x: number, y: number): number;
-  /** Optional faster path for a row of samples sharing one y (CSS offsets from the centre), with distance estimates. */
-  row?(xs: Float64Array, count: number, y: number, out: Float64Array, distances: Float64Array): void;
+  /**
+   * Optional faster path for a row of samples sharing one y (CSS offsets from
+   * the centre), with distance estimates, and 1 in `pending` where a sample
+   * reached the budget unresolved (lastUnresolved for single samples).
+   */
+  row?(xs: Float64Array, count: number, y: number, out: Float64Array, distances: Float64Array, pending?: Uint8Array): void;
   stats: SampleStats;
 }
 
@@ -47,16 +51,16 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
     // Carried across rows: neighbouring rows usually share their interior components.
     const hint: CycleHint = { found: false, re: 0, im: 0, period: 0, successes: 0, failures: 0, skipped: 0 };
     return { stats,
-      sample(x, y) { lastSample.distance = NaN; return directDouble(cr + x * scale, ci - y * scale, limit, scale); },
-      row(xs, count, y, out, distances) {
+      sample(x, y) { lastSample.distance = NaN; lastSample.unresolved = false; return directDouble(cr + x * scale, ci - y * scale, limit, scale); },
+      row(xs, count, y, out, distances, pending) {
         if (row.length < count) row = new Float64Array(count);
         for (let i = 0; i < count; i++) row[i] = cr + xs[i] * scale;
-        stats.unresolved += directRow(row, ci - y * scale, count, limit, out, distances, scale, hint);
+        stats.unresolved += directRow(row, ci - y * scale, count, limit, out, distances, scale, hint, pending);
       } };
   }
   const logRadius = viewLogRadius(view, cssWidth, cssHeight);
   const interior = interiorStatus(view, logRadius);
-  if (interior === 'inside') return { stats, sample: () => { lastSample.distance = NaN; return INTERIOR; } };
+  if (interior === 'inside') return { stats, sample: () => { lastSample.distance = NaN; lastSample.unresolved = false; return INTERIOR; } };
   const exactInterior = interior === 'near';
 
   const native = view.logScale > EXTENDED_LOG_SCALE;
@@ -77,7 +81,7 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   let hint: { m: number; sr: number; si: number; period: number } | undefined;
   return { stats, sample(x, y) {
     // Fixed-point is only used per pixel for exact interior tests or detected glitches.
-    lastSample.distance = NaN;
+    lastSample.distance = NaN; lastSample.unresolved = false;
     let cr: bigint | undefined, ci: bigint | undefined;
     const coordinates = () => {
       cr ??= view.re + scaledFixed(x, view.logScale, view.bits);
@@ -89,7 +93,9 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
     }
     const fallback = () => {
       coordinates(); stats.fallbacks++;
-      return directFixed(cr!, ci!, view.bits, limit);
+      const value = directFixed(cr!, ci!, view.bits, limit);
+      if (lastSample.unresolved) stats.unresolved++;
+      return value;
     };
     if (!native) return perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats, view.logScale);
     const dcRe = offsetRe + x * scale, dcIm = offsetIm - y * scale;

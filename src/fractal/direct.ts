@@ -56,6 +56,7 @@ export function directDouble(cr: number, ci: number, limit: number, pixel = 1): 
       if (n === checkpoint) { savedRe = re; savedIm = im; checkpoint *= 2; }
     }
   }
+  lastSample.unresolved = true;
   return INTERIOR;
 }
 
@@ -89,11 +90,13 @@ const LANE_CHUNK = 32;
  * from any start and a failed attempt changes nothing else, so results never
  * depend on the hint: they stay identical to directDouble's.
  * Distance estimates (as directDouble's) go to `distances`, NaN for interiors.
- * Returns how many samples reached the budget unresolved.
+ * Returns how many samples reached the budget unresolved, and marks them with
+ * 1 in `pending` (0 elsewhere).
  */
 export function directRow(cr: Float64Array, ci: number, count: number, limit: number, out: Float64Array,
-  distances?: Float64Array, pixel = 1, hint?: CycleHint): number {
+  distances?: Float64Array, pixel = 1, hint?: CycleHint, pending?: Uint8Array): number {
   let next = 0, unresolved = 0;
+  pending?.fill(0, 0, count);
   const take = () => {
     while (next < count) {
       const i = next++;
@@ -196,7 +199,7 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       if (done) {
         out[p0] = INTERIOR;
         if (distances) distances[p0] = NaN;
-        if (n0 >= limit && !(x0 === s0 && y0 === t0)) unresolved++;
+        if (n0 >= limit && !(x0 === s0 && y0 === t0)) { unresolved++; if (pending) pending[p0] = 1; }
         p0 = take(); c0 = p0 < 0 ? 0 : cr[p0]; q0 = p0 < 0 ? 0 : ci;
         x0 = y0 = a0 = b0 = n0 = s0 = t0 = m0 = w0 = u0 = v0 = r0 = f0 = 0; k0 = 32;
       } else if (n0 >= k0 || realign) {
@@ -227,7 +230,7 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       if (done) {
         out[p1] = INTERIOR;
         if (distances) distances[p1] = NaN;
-        if (n1 >= limit && !(x1 === s1 && y1 === t1)) unresolved++;
+        if (n1 >= limit && !(x1 === s1 && y1 === t1)) { unresolved++; if (pending) pending[p1] = 1; }
         p1 = take(); c1 = p1 < 0 ? 0 : cr[p1]; q1 = p1 < 0 ? 0 : ci;
         x1 = y1 = a1 = b1 = n1 = s1 = t1 = m1 = w1 = u1 = v1 = r1 = f1 = 0; k1 = 32;
       } else if (n1 >= k1 || realign) {
@@ -258,7 +261,7 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
       if (done) {
         out[p2] = INTERIOR;
         if (distances) distances[p2] = NaN;
-        if (n2 >= limit && !(x2 === s2 && y2 === t2)) unresolved++;
+        if (n2 >= limit && !(x2 === s2 && y2 === t2)) { unresolved++; if (pending) pending[p2] = 1; }
         p2 = take(); c2 = p2 < 0 ? 0 : cr[p2]; q2 = p2 < 0 ? 0 : ci;
         x2 = y2 = a2 = b2 = n2 = s2 = t2 = m2 = w2 = u2 = v2 = r2 = f2 = 0; k2 = 32;
       } else if (n2 >= k2 || realign) {
@@ -287,5 +290,6 @@ export function directFixed(cr: bigint, ci: bigint, bits: number, limit: number)
       savedRe = re; savedIm = im; checkpoint *= 2;
     }
   }
+  lastSample.unresolved = true;
   return INTERIOR;
 }

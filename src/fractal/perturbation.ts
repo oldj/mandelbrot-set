@@ -204,6 +204,7 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
     }
   }
   stats.unresolved++;
+  lastSample.unresolved = true;
   return INTERIOR;
 }
 
@@ -285,5 +286,6 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
     if (rebase) { delta = total; m = 0; }
   }
   stats.unresolved++;
+  lastSample.unresolved = true;
   return INTERIOR;
 }
