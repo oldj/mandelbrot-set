@@ -1,6 +1,7 @@
-import { color, createSampler } from './fractal.ts';
-import type { ReferenceCache } from './fractal';
-import type { RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
+import { color, computeOrbit, createSampler, referenceFromOrbit } from './fractal.ts';
+import type { ReferenceCache, ReferenceEntry } from './fractal';
+import type { OrbitData, ReferenceSpec } from './reference';
+import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './types';
 
 let generation = 0;
 const referenceCache: ReferenceCache = {};
@@ -9,13 +10,72 @@ const CANCELLED = Symbol('cancelled');
 const FLUSH_MS = 16;
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
+// Shared reference state. Work on a reference is tied to its key, not to one
+// render: a newer request for the same key continues it instead of restarting.
+let wantedKey: number | undefined;
+let orbit: { key: number; spec: ReferenceSpec; data: OrbitData } | undefined;
+let shared: { key: number; promise: Promise<ReferenceEntry> } | undefined;
+let waiting: { key: number; resolve: () => void; reject: (reason: unknown) => void } | undefined;
+
 self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
+  if ('type' in data && data.type === 'reference') {
+    orbit = { key: data.key, spec: data.spec, data: data.orbit };
+    if (waiting?.key === data.key) { waiting.resolve(); waiting = undefined; }
+    return;
+  }
   generation = data.id;
+  wantedKey = 'type' in data ? undefined : data.reference?.key;
+  if (waiting && waiting.key !== wantedKey) { waiting.reject(CANCELLED); waiting = undefined; }
   if ('type' in data) return;
   void render(data).catch(error => {
     if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
   });
 };
+
+/** Yield regularly, and stop once no request needs this reference any more. */
+function referenceCheckpoint(key: number) {
+  let lastYield = performance.now();
+  return async () => {
+    if (wantedKey !== key) throw CANCELLED;
+    if (performance.now() - lastYield < 8) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    lastYield = performance.now();
+    if (wantedKey !== key) throw CANCELLED;
+  };
+}
+
+async function receiveOrbit(plan: ReferencePlan): Promise<OrbitData> {
+  if (orbit?.key === plan.key) return orbit.data;
+  if (plan.orbit) {
+    orbit = { key: plan.key, spec: plan.spec, data: plan.orbit };
+    return plan.orbit;
+  }
+  const checkpoint = referenceCheckpoint(plan.key);
+  if (plan.build) {
+    const data = await computeOrbit(plan.spec.view, plan.spec.limit, checkpoint);
+    orbit = { key: plan.key, spec: plan.spec, data };
+    send({ type: 'reference', key: plan.key, orbit: data });
+    return data;
+  }
+  waiting?.reject(CANCELLED);
+  await new Promise<void>((resolve, reject) => { waiting = { key: plan.key, resolve, reject }; });
+  return orbit!.data;
+}
+
+/** One reference (orbit plus BLA table) per key, however many renders ask for it. */
+function sharedReference(plan: ReferencePlan): Promise<ReferenceEntry> {
+  if (shared?.key === plan.key) return shared.promise;
+  const promise = (async () => {
+    const data = await receiveOrbit(plan);
+    const reference = await referenceFromOrbit(data, plan.spec.logRadius, referenceCheckpoint(plan.key));
+    return { ...plan.spec, reference };
+  })();
+  const current = { key: plan.key, promise };
+  shared = current;
+  // A cancelled build may be requested again later; keep the received orbit, drop the promise.
+  promise.catch(() => { if (shared === current) shared = undefined; });
+  return promise;
+}
 
 async function render(request: RenderRequest): Promise<void> {
   const started = performance.now();
@@ -34,7 +94,9 @@ async function render(request: RenderRequest): Promise<void> {
     if (batch.length) send({ type: 'tiles', id, tiles: batch }, transfer);
     batch = []; transfer = []; lastFlush = performance.now();
   };
-  const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache) : undefined;
+  const { reference } = request;
+  const source = reference && (() => sharedReference(reference));
+  const sampler = regions.length ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
   // All passes sample the same world rectangle. Coarse pixels are replaced, not stretched forever.
   for (const step of [8, 4, 2, 1]) {
     let tileOffset = 0;

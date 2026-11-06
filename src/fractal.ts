@@ -2,12 +2,12 @@ import { add, extended, fromFixed, linear, logDifference, logMagnitude, multiply
 import type { Extended } from './extended.ts';
 import { fixedToNumber, scaledFixed } from './precision.ts';
 import type { View } from './precision.ts';
+import { DEEP_LOG_SCALE, interiorStatus, referenceOffset, referenceSpec, viewLogRadius } from './reference.ts';
+import type { OrbitData, ReferenceSpec } from './reference.ts';
 
 export const INTERIOR = -1;
 const TWO = extended(2);
 const BLA_EPSILON_BITS = 42;
-/** A reused reference may be at most 2^24 CSS pixels from the view centre. */
-const MAX_REFERENCE_OFFSET_BITS = 24;
 
 export function iterationBudget(logScale: number): number {
   return Math.ceil((800 + Math.max(0, -logScale - 8) * 32) / 512) * 512;
@@ -93,19 +93,28 @@ export interface Reference {
 /** Called periodically so stale jobs can be cancelled without restarting workers. */
 export type Checkpoint = () => Promise<void>;
 
-export async function buildReference(view: View, limit: number, logDeltaRadius: number, checkpoint: Checkpoint): Promise<Reference> {
-  const orbit: Extended[] = [ZERO];
+/** The expensive, multi-precision part of a reference: computed once, then shared by every worker. */
+export async function computeOrbit(view: View, limit: number, checkpoint: Checkpoint): Promise<OrbitData> {
+  const data = { re: new Float64Array(limit + 1), im: new Float64Array(limit + 1), exp: new Float64Array(limit + 1) };
   const shift = BigInt(view.bits);
   const bailout = 256n << (shift * 2n);
-  let re = 0n, im = 0n;
+  let re = 0n, im = 0n, length = 1;
   for (let n = 1; n <= limit; n++) {
     const r2 = re * re, i2 = im * im;
     im = ((2n * re * im) >> shift) + view.im;
     re = ((r2 - i2) >> shift) + view.re;
-    orbit.push(fromFixed(re, im, view.bits));
+    const z = fromFixed(re, im, view.bits);
+    data.re[n] = z.re; data.im[n] = z.im; data.exp[n] = z.exp;
+    length = n + 1;
     if (re * re + im * im > bailout) break;
     if (n % 128 === 0) await checkpoint();
   }
+  return { re: data.re.slice(0, length), im: data.im.slice(0, length), exp: data.exp.slice(0, length) };
+}
+
+/** Double-precision orbit and BLA table from a (possibly received) orbit; cheap next to the BigInt orbit. */
+export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number, checkpoint: Checkpoint): Promise<Reference> {
+  const orbit: Extended[] = Array.from(data.re, (re, i) => ({ re, im: data.im[i], exp: data.exp[i] }));
   const real = Float64Array.from(orbit, z => z.re * 2 ** z.exp);
   const imag = Float64Array.from(orbit, z => z.im * 2 ** z.exp);
   const first: BLA[] = [];
@@ -131,6 +140,10 @@ export async function buildReference(view: View, limit: number, logDeltaRadius: 
     last = level;
   }
   return { orbit, real, imag, levels };
+}
+
+export async function buildReference(view: View, limit: number, logDeltaRadius: number, checkpoint: Checkpoint): Promise<Reference> {
+  return referenceFromOrbit(await computeOrbit(view, limit, checkpoint), logDeltaRadius, checkpoint);
 }
 
 function lookupExtended(reference: Reference, m: number, logDelta: number, remaining: number): BLA | undefined {
@@ -231,46 +244,31 @@ export interface Sampler {
   stats: SampleStats;
 }
 
-export interface ReferenceCache {
-  entry?: { view: View; limit: number; logRadius: number; reference: Reference };
-}
+export interface ReferenceEntry extends ReferenceSpec { reference: Reference }
 
-export async function createSampler(view: View, cssWidth: number, cssHeight: number, limit: number, checkpoint: Checkpoint, cache: ReferenceCache = {}): Promise<Sampler> {
+export interface ReferenceCache { entry?: ReferenceEntry }
+
+/** Supplies a shared reference chosen by the main thread instead of building one locally. */
+export type ReferenceSource = () => Promise<ReferenceEntry>;
+
+export async function createSampler(view: View, cssWidth: number, cssHeight: number, limit: number, checkpoint: Checkpoint,
+  cache: ReferenceCache = {}, source?: ReferenceSource): Promise<Sampler> {
   const stats: SampleStats = { fallbacks: 0, skipped: 0 };
-  if (view.logScale > -38) {
+  if (view.logScale > DEEP_LOG_SCALE) {
     const cr = fixedToNumber(view.re, view.bits), ci = fixedToNumber(view.im, view.bits);
     const scale = 2 ** view.logScale;
     return { stats, sample: (x, y) => directDouble(cr + x * scale, ci - y * scale, limit) };
   }
-  const logRadius = view.logScale + Math.log2(Math.hypot(cssWidth, cssHeight) / 2 + 1);
-  const centreRe = fixedToNumber(view.re, view.bits), centreIm = fixedToNumber(view.im, view.bits);
-  const q = (centreRe - 0.25) ** 2 + centreIm ** 2;
-  const cardioid = q * (q + centreRe - 0.25) - centreIm ** 2 / 4;
-  const bulb = (centreRe + 1) ** 2 + centreIm ** 2 - 1 / 16;
-  // A conservative derivative/rounding bound over [-4,4]^2. Away from the
-  // boundary, avoid doing multi-precision cardioid tests for every pixel.
-  const margin = 8192 * (Number.EPSILON + 2 ** logRadius);
-  const nearby = Math.abs(centreRe) < 4 && Math.abs(centreIm) < 4;
-  if (nearby && (cardioid < -margin || bulb < -margin)) return { stats, sample: () => INTERIOR };
-  const exactInterior = nearby && (cardioid <= margin || bulb <= margin);
+  const logRadius = viewLogRadius(view, cssWidth, cssHeight);
+  const interior = interiorStatus(view, logRadius);
+  if (interior === 'inside') return { stats, sample: () => INTERIOR };
+  const exactInterior = interior === 'near';
 
-  let entry = cache.entry;
-  let offset = ZERO;
-  if (entry && entry.view.bits >= view.bits && entry.limit >= limit) {
-    const shift = BigInt(entry.view.bits - view.bits);
-    offset = fromFixed((view.re << shift) - entry.view.re, (view.im << shift) - entry.view.im, entry.view.bits);
-    const logOffset = logMagnitude(offset);
-    const maxLog = Math.max(logOffset, logRadius);
-    const bound = maxLog + Math.log2(2 ** (logOffset - maxLog) + 2 ** (logRadius - maxLog));
-    // Pixel deltas are added to the offset in 53-bit doubles. Zooming far into
-    // an off-centre point would leave too few bits to tell pixels apart
-    // (precision bits never shrink, so `bits` alone does not invalidate it).
-    if (bound > entry.logRadius || logOffset - view.logScale > MAX_REFERENCE_OFFSET_BITS) entry = undefined;
-  } else entry = undefined;
-  if (!entry) {
-    const paddedRadius = logRadius + 2;
-    const reference = await buildReference(view, limit, paddedRadius, checkpoint);
-    entry = { view: { ...view }, limit, logRadius: paddedRadius, reference };
+  let entry = source ? await source() : cache.entry;
+  let offset = entry && referenceOffset(entry, view, logRadius, limit);
+  if (!entry || !offset) {
+    const spec = referenceSpec(view, cssWidth, cssHeight, limit);
+    entry = { ...spec, reference: await buildReference(view, limit, spec.logRadius, checkpoint) };
     cache.entry = entry;
     offset = ZERO;
   }

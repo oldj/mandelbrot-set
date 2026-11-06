@@ -6,7 +6,9 @@ import { compactCoordinate, viewClipboardText, viewInfo } from './view-info';
 import { missingRegions, panRaster, shiftQuality } from './raster-cache';
 import { TileStage } from './tile-stage';
 import { renderWorkerCount, workerCapacity } from './worker-policy';
-import type { RenderMessage, RenderRequest } from './types';
+import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './reference';
+import type { OrbitData, ReferenceSpec } from './reference';
+import type { ReferencePlan, RenderMessage, RenderRequest } from './types';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
 const infoPanel = document.querySelector<HTMLElement>('#view-info')!;
@@ -40,6 +42,32 @@ const passCounts = new Map<number, number>();
 const workers: Worker[] = [];
 const workerLimit = workerCapacity(navigator.hardwareConcurrency);
 let activeWorkerCount = 1;
+
+/** The one reference orbit deep renders share; worker 0 builds it, the rest receive copies. */
+interface SharedOrbit { key: number; spec: ReferenceSpec; orbit?: OrbitData }
+let sharedOrbit: SharedOrbit | undefined;
+let referenceKeys = 0;
+/** The orbit key each worker already holds, so it is sent at most once per worker. */
+const workerOrbitKeys: (number | undefined)[] = [];
+
+function planReference(target: View, iterations: number): SharedOrbit | undefined {
+  if (!needsReference(target, cssWidth, cssHeight)) return undefined;
+  if (!sharedOrbit || !referenceOffset(sharedOrbit.spec, target, viewLogRadius(target, cssWidth, cssHeight), iterations)) {
+    sharedOrbit = { key: ++referenceKeys, spec: referenceSpec(target, cssWidth, cssHeight, iterations) };
+  }
+  return sharedOrbit;
+}
+
+function referencePlan(shared: SharedOrbit, workerIndex: number): ReferencePlan {
+  const plan: ReferencePlan = { key: shared.key, spec: shared.spec };
+  if (workerOrbitKeys[workerIndex] === shared.key) return plan;
+  if (shared.orbit) {
+    workerOrbitKeys[workerIndex] = shared.key;
+    return { ...plan, orbit: shared.orbit };
+  }
+  // Worker 0 is always active. Others wait; the orbit is forwarded once it exists.
+  return workerIndex === 0 ? { ...plan, build: true } : plan;
+}
 
 interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number }
 let surface: Surface | undefined;
@@ -179,13 +207,16 @@ function startRender(): void {
   activeWorkerCount = renderWorkerCount(workerLimit, renderPixels, view.logScale, iterations);
   canvas.dataset.workers = String(activeWorkerCount);
   while (workers.length < activeWorkerCount) createWorker();
+  const shared = renderPixels ? planReference(surface.view, iterations) : undefined;
+  canvas.dataset.referenceKey = shared ? String(shared.key) : '';
   workers.forEach((worker, workerIndex) => {
     if (workerIndex >= activeWorkerCount) {
       worker.postMessage({ type: 'cancel', id: generation });
       return;
     }
     worker.postMessage({ id: generation, view: surface!.view, width: image.width, height: image.height,
-      cssWidth, cssHeight, workerIndex, workerCount: activeWorkerCount, iterations, regions } satisfies RenderRequest);
+      cssWidth, cssHeight, workerIndex, workerCount: activeWorkerCount, iterations, regions,
+      reference: shared && referencePlan(shared, workerIndex) } satisfies RenderRequest);
   });
   scheduleDraw();
 }
@@ -201,6 +232,19 @@ function changed(): void {
 function createWorker(): void {
   const worker = new Worker(new URL('./mandelbrot.worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }: MessageEvent<RenderMessage>) => {
+    if (data.type === 'reference') {
+      // Still useful after newer generations when they reuse the same reference.
+      if (sharedOrbit?.key !== data.key) return;
+      sharedOrbit.orbit = data.orbit;
+      workers.forEach((other, workerIndex) => {
+        if (workerOrbitKeys[workerIndex] === data.key) return;
+        if (other === worker) { workerOrbitKeys[workerIndex] = data.key; return; }
+        if (workerIndex >= activeWorkerCount) return;
+        workerOrbitKeys[workerIndex] = data.key;
+        other.postMessage({ type: 'reference', key: data.key, spec: sharedOrbit!.spec, orbit: data.orbit });
+      });
+      return;
+    }
     if (data.id !== generation || !surface) return;
     if (data.type === 'error') {
       canvas.title = `绘制失败：${data.message}。按 Home 重试。`;

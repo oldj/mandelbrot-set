@@ -315,3 +315,36 @@ test('coordinate labels adapt to available width without changing the view', () 
   assert.equal(real.textContent, '-0.60000000');
   assert.equal(h.request().id, id);
 });
+
+test('deep renders share one orbit: worker 0 builds it, the rest receive it once', () => {
+  const h = harness({ cores: 4 });
+  for (let i = 0; i < 26; i++) h.window.emit('wheel', { clientX: 70, clientY: 300, deltaY: -600, deltaMode: 0 });
+  h.flush();
+  const requests = () => h.workers.map(worker => worker.messages.at(-1));
+  const first = requests();
+  assert.ok(first[0].view.logScale <= -38);
+  assert.equal(first.length, 3);
+  const { key } = first[0].reference;
+  assert.equal(first[0].reference.build, true);
+  for (const request of first.slice(1)) {
+    assert.equal(request.reference.key, key);
+    assert.equal(request.reference.build, undefined);
+    assert.equal(request.reference.orbit, undefined);
+  }
+  const orbit = { re: new Float64Array([0, 1]), im: new Float64Array([0, 0]), exp: new Float64Array([0, -1]) };
+  h.workers[0].emit({ type: 'reference', key, orbit });
+  for (const worker of h.workers.slice(1)) assert.deepEqual(worker.messages.at(-1), { type: 'reference', key, spec: first[0].reference.spec, orbit });
+  // A small pan reuses the same reference; nobody is sent the orbit again.
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 400, clientY: 300 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 380, clientY: 300 }); h.flush();
+  const panned = requests().filter(message => message.reference);
+  assert.ok(panned.length > 0);
+  for (const request of panned) assert.deepEqual(Object.keys(request.reference).sort(), ['key', 'spec']);
+  assert.ok(panned.every(request => request.reference.key === key));
+  // Zooming out far enough needs a new reference.
+  h.canvas.emit('pointerup', { pointerId: 1 });
+  for (let i = 0; i < 4; i++) h.window.emit('wheel', { clientX: 400, clientY: 300, deltaY: 600, deltaMode: 0 });
+  h.flush();
+  assert.notEqual(h.request().reference.key, key);
+  assert.equal(h.request().reference.build, true);
+});

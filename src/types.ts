@@ -1,8 +1,24 @@
 import type { View } from './precision';
+import type { OrbitData, ReferenceSpec } from './reference';
 
 export interface RenderRegion { x: number; y: number; width: number; height: number }
 
-export type RenderCommand = RenderRequest | { type: 'cancel'; id: number };
+/**
+ * Deep views share one reference orbit. Worker 0 builds it (`build`) and posts
+ * it to the main thread, which forwards it; other workers receive `orbit` up
+ * front when the main thread already has it, otherwise they wait for it.
+ */
+export interface ReferencePlan {
+  key: number;
+  spec: ReferenceSpec;
+  build?: boolean;
+  orbit?: OrbitData;
+}
+
+/** Main thread -> worker: a shared orbit, delivered whenever it becomes available. */
+export interface ReferenceDelivery { type: 'reference'; key: number; spec: ReferenceSpec; orbit: OrbitData }
+
+export type RenderCommand = RenderRequest | ReferenceDelivery | { type: 'cancel'; id: number };
 
 export interface RenderRequest {
   id: number;
@@ -15,6 +31,7 @@ export interface RenderRequest {
   workerCount: number;
   iterations: number;
   regions?: RenderRegion[];
+  reference?: ReferencePlan;
 }
 
 /** One finished tile; `step` is the sample spacing in physical pixels. */
@@ -44,4 +61,7 @@ export interface RenderProgress {
   fallbacks: number;
 }
 
-export type RenderMessage = RenderTiles | RenderProgress | { type: 'error'; id: number; message: string };
+/** Worker -> main thread: the orbit a `build` plan produced. */
+export interface ReferenceBuilt { type: 'reference'; key: number; orbit: OrbitData }
+
+export type RenderMessage = ReferenceBuilt | RenderTiles | RenderProgress | { type: 'error'; id: number; message: string };

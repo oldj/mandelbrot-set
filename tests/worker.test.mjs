@@ -114,3 +114,55 @@ test('partial worker passes cover only exposed pixels and reconstruct a full fre
   assert.equal(tiles.filter(t => t.step === 1).reduce((n, t) => n + t.width * t.height, 0), exposed);
   assert.ok(exposed < width * height / 5);
 });
+
+import { referenceSpec } from '../src/reference.ts';
+
+function deepRequest(id, extra = {}) {
+  const view = ensurePrecision({ ...initialView(40, 30), logScale: -1200 });
+  view.re = toFixed(-2, view.bits);
+  return { id, view, width: 40, height: 30, cssWidth: 40, cssHeight: 30,
+    iterations: iterationBudget(view.logScale), workerIndex: 0, workerCount: 1, ...extra };
+}
+const step1 = tiles => tiles.filter(tile => tile.step === 1).map(({ x, y, pixels }) => [x, y, [...pixels]]);
+
+test('one worker builds the shared orbit; another waits for it and renders identical pixels', async t => {
+  const builder = startWorker(t), receiver = startWorker(t), local = startWorker(t);
+  const base = deepRequest(1);
+  const spec = referenceSpec(base.view, base.cssWidth, base.cssHeight, base.iterations);
+  const built = new Promise(resolve => builder.on('message', m => { if (m.type === 'reference') resolve(m); }));
+  const receiverMessages = [];
+  receiver.on('message', m => receiverMessages.push(m));
+  const pending = collect(receiver, { ...base, reference: { key: 7, spec } });
+  const own = await collect(builder, { ...base, reference: { key: 7, spec, build: true } });
+  const message = await built;
+  assert.equal(message.key, 7);
+  assert.equal(message.orbit.re.length, message.orbit.exp.length);
+  assert.ok(!receiverMessages.some(m => m.type === 'tiles'), 'receiver cannot start before the orbit arrives');
+  receiver.postMessage({ type: 'reference', key: 7, spec, orbit: message.orbit });
+  const received = await pending;
+  const standalone = await collect(local, base);
+  assert.deepEqual(step1(own), step1(standalone));
+  assert.deepEqual(step1(received), step1(standalone));
+});
+
+test('a newer request for the same key continues the build; a different key cancels it', async t => {
+  const worker = startWorker(t);
+  const base = deepRequest(1);
+  const spec = referenceSpec(base.view, base.cssWidth, base.cssHeight, base.iterations);
+  const references = [];
+  worker.on('message', m => { if (m.type === 'reference') references.push(m.key); });
+  worker.postMessage({ ...base, reference: { key: 1, spec, build: true } });
+  const tiles = await collect(worker, { ...base, id: 2, reference: { key: 1, spec, build: true } });
+  assert.ok(tiles.length > 0);
+  assert.deepEqual(references, [1], 'the orbit is computed and posted once');
+  // A cached orbit for the same key is reused without posting again.
+  await collect(worker, { ...base, id: 3, reference: { key: 1, spec, build: true } });
+  assert.deepEqual(references, [1]);
+  // Switching keys abandons the stale build entirely.
+  const deeper = ensurePrecision({ ...base.view, logScale: -4000 });
+  const stale = referenceSpec(deeper, 40, 30, iterationBudget(-4000));
+  worker.postMessage({ ...base, id: 4, view: deeper, iterations: stale.limit, reference: { key: 2, spec: stale, build: true } });
+  await collect(worker, { ...base, id: 5, view: initialView(40, 30), iterations: 1024 });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(references, [1]);
+});
