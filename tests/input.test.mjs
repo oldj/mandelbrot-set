@@ -330,6 +330,32 @@ test('the coordinate dialog copies exactly the full value shown, and failures sa
   assert.match(denied.elements.get('#coordinate-copy-feedback').textContent, /Couldn’t copy/);
 });
 
+test('a click on the backdrop closes the coordinate dialog, but not one inside it or a drag out of it', () => {
+  const h = harness();
+  const dialog = h.elements.get('#coordinate-dialog'), digits = h.elements.get('#coordinate-full');
+  dialog.getBoundingClientRect = () => ({ left: 100, top: 200, right: 660, bottom: 400 });
+  const press = (target, x, y) => {
+    dialog.emit('pointerdown', { target, clientX: x, clientY: y });
+    return (x2 = x, y2 = y) => dialog.emit('click', { target, clientX: x2, clientY: y2 });
+  };
+  h.elements.get('#centre-real').emit('click');
+  assert.equal(dialog.open, true);
+  // The dialog's own padding is the dialog element too, and stays open.
+  press(dialog, 110, 210)();
+  assert.equal(dialog.open, true);
+  // Clicks on its content stay open.
+  press(digits, 300, 300)();
+  assert.equal(dialog.open, true);
+  // Selecting digits and releasing outside the box stays open.
+  press(dialog, 110, 210)(30, 30);
+  assert.equal(dialog.open, true);
+  press(digits, 300, 300)(30, 30);
+  assert.equal(dialog.open, true);
+  // A press and release on the backdrop closes it.
+  press(dialog, 30, 30)();
+  assert.equal(dialog.open, false);
+});
+
 test('coordinate labels adapt to available width without changing the view', () => {
   const h = harness(); h.flushFrames();
   const real = h.elements.get('#centre-real');

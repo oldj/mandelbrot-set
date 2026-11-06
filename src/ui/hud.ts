@@ -103,6 +103,21 @@ export function createHud({ canvas, measure, current, requestDraw, onReset }: Hu
   realLabel.addEventListener('click', () => showCoordinate('real'));
   imaginaryLabel.addEventListener('click', () => showCoordinate('imaginary'));
   closeCoordinate.addEventListener('click', () => coordinateDialog.close());
+  // A click on the backdrop closes the dialog. The browser reports backdrop clicks
+  // as clicks on the <dialog> itself, as it does clicks on its padding, so check
+  // that the point lies outside the box. The press must start outside too:
+  // selecting digits and releasing past the edge must not close it.
+  const outside = (event: MouseEvent) => {
+    if (event.target !== coordinateDialog) return false;
+    const box = coordinateDialog.getBoundingClientRect();
+    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
+  };
+  let pressedOutside = false;
+  coordinateDialog.addEventListener('pointerdown', event => { pressedOutside = outside(event); });
+  coordinateDialog.addEventListener('click', event => {
+    if (pressedOutside && outside(event)) coordinateDialog.close();
+    pressedOutside = false;
+  });
   coordinateDialog.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
 
   const stopCopyView = copyOnClick(copyButton, copyFeedback, () => {
