@@ -11,7 +11,7 @@
  * budget only where it is needed.
  */
 import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, referenceFromOrbit } from '../fractal/index.ts';
-import { shadedWord } from './palette.ts';
+import { paletteShader } from './palette.ts';
 import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
@@ -125,6 +125,7 @@ async function render(request: RenderRequest): Promise<void> {
     if (generation !== request.id) throw CANCELLED;
   };
   const { id, view, width, height, cssWidth, cssHeight, workerIndex, workerCount, iterations } = request;
+  const shade = paletteShader(request.palette);
   const regions = request.regions ?? [{ x: 0, y: 0, width, height }];
   let batch: TileData[] = [], transfer: ArrayBuffer[] = [], lastFlush = started;
   const flush = () => {
@@ -182,7 +183,7 @@ async function render(request: RenderRequest): Promise<void> {
           if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
           else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
           for (let k = 0; k < count; k++) {
-            words[row * columns + targets[k]] = shadedWord(values[k], distances[k] * physical);
+            words[row * columns + targets[k]] = shade(values[k], distances[k] * physical);
             if (unresolved[k]) (tile.pending ??= new Uint8Array(tile.width * tile.height))[row * step * tile.width + targets[k] * step] = 1;
           }
         }
@@ -230,6 +231,7 @@ async function deepen(request: RenderRequest): Promise<void> {
     if (generation !== request.id) throw CANCELLED;
   };
   const { id, view, width, height, cssWidth, cssHeight, iterations, reference } = request;
+  const shade = paletteShader(request.palette);
   const tiles = finished?.request.id === id ? finished.tiles : [];
   const source = reference && (() => sharedReference(reference));
   // Worker 0 builds a longer shared orbit even without pixels of its own to deepen: the others wait for it.
@@ -258,7 +260,7 @@ async function deepen(request: RenderRequest): Promise<void> {
       if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
       else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
       for (let k = 0; k < count; k++) {
-        words[row * tile.width + targets[k]] = shadedWord(values[k], distances[k] * physical);
+        words[row * tile.width + targets[k]] = shade(values[k], distances[k] * physical);
         pending[row * tile.width + targets[k]] = unresolved[k];
       }
       samples += count;

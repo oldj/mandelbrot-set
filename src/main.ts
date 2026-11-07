@@ -14,7 +14,9 @@ import { gesture, wheelAnchor, wheelLogFactor } from './ui/gestures.ts';
 import { createHud } from './ui/hud.ts';
 import { missingRegions, panRaster, shiftQuality } from './render/raster-cache.ts';
 import { TileStage } from './render/tile-stage.ts';
-import { formatViewHash, parseViewHash } from './ui/url-state.ts';
+import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
+import { isPalette } from './render/palette-names.ts';
+import type { Palette } from './render/palette-names.ts';
 import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
 import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
@@ -56,6 +58,13 @@ const workers: Worker[] = [];
 const workerLimit = workerCapacity(navigator.hardwareConcurrency);
 let activeWorkerCount = 1;
 
+/** The colour scheme: from the link if it names one, else the last one chosen here, else classic. */
+const PALETTE_KEY = 'mandelbrot-palette';
+function storedPalette(): Palette | undefined {
+  try { const name = localStorage.getItem(PALETTE_KEY); return isPalette(name) ? name : undefined; } catch { return undefined; }
+}
+let palette: Palette = viewHashPalette(location.hash) ?? storedPalette() ?? 'classic';
+
 /** The one reference orbit deep renders share; worker 0 builds it, the rest receive copies. */
 interface SharedOrbit { key: number; spec: ReferenceSpec; orbit?: OrbitData }
 let sharedOrbit: SharedOrbit | undefined;
@@ -82,7 +91,7 @@ function referencePlan(shared: SharedOrbit, workerIndex: number): ReferencePlan 
   return workerIndex === 0 ? { ...plan, build: true } : plan;
 }
 
-interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number; iterations: number }
+interface Surface { canvas: HTMLCanvasElement; view: View; cssWidth: number; cssHeight: number; iterations: number; palette: Palette }
 let surface: Surface | undefined;
 let quality = new Uint8Array();
 let stage: TileStage | undefined;
@@ -170,7 +179,8 @@ function scheduleDraw(): void {
 }
 
 const hud = createHud({
-  canvas, measure: ctx, requestDraw: scheduleDraw, onReset: () => resetView(),
+  canvas, measure: ctx, requestDraw: scheduleDraw, onReset: () => resetView(), palette,
+  onPalette: next => setPalette(next),
   current: () => view && { view, cssWidth, cssHeight },
   onApply: next => { goTo(next); writeHash(); },
   onZoom: logFactor => {
@@ -185,8 +195,9 @@ function startRender(): void {
   const iterations = chooseBudget(budgetMemory, view.logScale);
   budgetMemory = rememberUse(budgetMemory, view.logScale);
   // Reused pixels must come from the same budget: a larger one may resolve black pixels.
+  // So must they come from the same palette.
   const pan = surface && surface.cssWidth === cssWidth && surface.cssHeight === cssHeight && surface.iterations === iterations
-    && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
+    && surface.palette === palette && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
     ? panRaster(surface.view, view, canvas.width, canvas.height, cssWidth, cssHeight) : undefined;
   // A release or subpixel movement need not cancel useful work already in flight.
   if (pan && pan.dx === 0 && pan.dy === 0 && canvas.dataset.rendered !== 'error') {
@@ -212,11 +223,12 @@ function startRender(): void {
   } else {
     imageContext.setTransform(image.width / cssWidth, 0, 0, image.height / cssHeight, 0, 0);
     if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
-    quality = projectedQuality(surface, completedStep, image.width, image.height);
+    // Another palette's preview is only a placeholder: every pass paints over it.
+    quality = projectedQuality(surface?.palette === palette ? surface : undefined, completedStep, image.width, image.height);
   }
   const regions = pan ? missingRegions(quality, image.width, image.height)
     : [{ x: 0, y: 0, width: image.width, height: image.height }];
-  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations };
+  surface = { canvas: image, view: pan?.view ?? { ...view }, cssWidth, cssHeight, iterations, palette };
   completedStep = 255;
   generation++;
   lastRender = performance.now();
@@ -229,6 +241,7 @@ function startRender(): void {
   canvas.dataset.precisionBits = String(view.bits);
   canvas.dataset.logScale = String(view.logScale);
   canvas.dataset.iterations = String(iterations);
+  canvas.dataset.palette = palette;
   const renderPixels = regions.reduce((sum, region) => sum + region.width * region.height, 0);
   canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
   canvas.dataset.computePixels = String(renderPixels);
@@ -239,7 +252,7 @@ function startRender(): void {
   const shared = renderPixels ? planReference(surface.view, iterations) : undefined;
   canvas.dataset.referenceKey = shared ? String(shared.key) : '';
   renderBase = { id: generation, view: surface.view, width: image.width, height: image.height,
-    cssWidth, cssHeight, workerCount: activeWorkerCount, iterations, regions };
+    cssWidth, cssHeight, workerCount: activeWorkerCount, iterations, regions, palette };
   workers.forEach((worker, workerIndex) => {
     if (workerIndex >= activeWorkerCount) {
       worker.postMessage({ type: 'cancel', id: generation });
@@ -256,7 +269,9 @@ let hashTimer: ReturnType<typeof setTimeout>;
 function writeHash(): void {
   clearTimeout(hashTimer);
   if (!view) return;
-  const hash = formatViewHash(view, cssWidth, cssHeight, initialView(cssWidth, cssHeight).logScale);
+  // The palette rides along when it isn't the default, so a link shows the same colours.
+  const hash = [formatViewHash(view, cssWidth, cssHeight, initialView(cssWidth, cssHeight).logScale),
+    palette === 'classic' ? '' : `palette=${palette}`].filter(Boolean).join('&');
   const url = location.pathname + location.search + (hash ? `#${hash}` : '');
   if (url !== location.pathname + location.search + location.hash) history.replaceState(history.state, '', url);
 }
@@ -460,12 +475,28 @@ function goTo(next: View): void {
   startRender();
 }
 
+/** Switch the colour scheme: every pixel is painted again, and the choice is remembered here. */
+function setPalette(next: Palette): void {
+  try { localStorage.setItem(PALETTE_KEY, next); } catch { /* not remembered: still applies now */ }
+  if (next === palette) return;
+  palette = next;
+  hud.setPalette(palette);
+  if (!view) return;
+  writeHash();
+  startRender();
+}
+
 // Edited or navigated hashes (back/forward) move the view; replaceState does not fire this.
 window.addEventListener('hashchange', () => {
   if (!view) return;
-  if (location.hash.length <= 1) { resetView(); return; }
+  const nextPalette = viewHashPalette(location.hash) ?? 'classic';
+  const paletteChanged = nextPalette !== palette;
+  if (paletteChanged) { palette = nextPalette; hud.setPalette(palette); }
+  // A hash without a centre (empty, or only a palette) is the full view.
+  if (!new URLSearchParams(location.hash.replace(/^#/, '')).has('re')) { resetView(); return; }
   const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
   if (next) goTo(next);
+  else if (paletteChanged) startRender();
 });
 
 function resize(): void {

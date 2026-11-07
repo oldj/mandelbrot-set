@@ -2,6 +2,8 @@
 import { ensurePrecision, isInitialView } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
 import { formatCoordinate } from './view-info.ts';
+import { isPalette } from '../render/palette-names.ts';
+import type { Palette } from '../render/palette-names.ts';
 
 /**
  * The view as a shareable URL hash: `re=…&im=…&zoom=…`.
@@ -59,6 +61,12 @@ export function parseDecimal(text: string, bits: number): bigint | undefined {
   const scale = 10n ** BigInt(fraction.length);
   const magnitude = ((BigInt(match[2] + fraction) << BigInt(bits)) * 2n + scale) / (2n * scale);
   return match[1] === '-' ? -magnitude : magnitude;
+}
+
+/** The palette a hash names (`palette=vivid`), if any and known. */
+export function viewHashPalette(hash: string): Palette | undefined {
+  const name = new URLSearchParams(hash.replace(/^#/, '')).get('palette');
+  return isPalette(name) ? name : undefined;
 }
 
 /** The view a hash describes, for a window whose initial view has `initialLogScale`; undefined if absent or invalid. */

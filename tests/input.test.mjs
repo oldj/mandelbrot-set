@@ -37,8 +37,13 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     clientWidth = 120;
     open = false;
     focused = false;
+    children = [];
+    parent = undefined;
+    append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+    contains(node) { for (let at = node; at; at = at.parent) if (at === this) return true; return false; }
+    removeEventListener() {}
     showModal() { this.open = true; }
-    focus() { this.focused = true; }
+    focus() { this.focused = true; documentTarget.activeElement = this; }
     select() { this.focused = true; }
     setAttribute(key, value) { this.attributes[key] = value; }
     removeAttribute(key) { delete this.attributes[key]; }
@@ -75,13 +80,17 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     terminate() {}
     emit(data) { this.onmessage({ data }); }
   }
+  const documentTarget = new Target();
   const canvas = new Canvas(), window = new Target();
-  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#view-controls', '#reset-view', '#zoom-in', '#zoom-out', '#copy-view', '#copy-feedback',
+  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#view-controls', '#reset-view', '#palette-picker', '#palette-button', '#palette-menu', '#zoom-in', '#zoom-out', '#copy-view', '#copy-feedback',
     '#view-dialog', '#view-form', '#close-view-dialog', '#view-re', '#view-im', '#view-zoom', '#view-re-error', '#view-im-error', '#view-zoom-error', '#copy-view-values', '#view-copy-feedback'].map(id => [id, new Target()])]);
   canvas.rect = { left: 0, top: 0, right: width, bottom: height, width, height };
+  elements.get('#palette-picker').append(elements.get('#palette-button'), elements.get('#palette-menu'));
+  elements.get('#palette-menu').hidden = true;
   window.devicePixelRatio = dpr;
   const globals = {
-    document: { querySelector: selector => elements.get(selector), createElement: () => new Canvas() },
+    document: Object.assign(documentTarget, { querySelector: selector => elements.get(selector),
+      createElement: tag => tag === 'canvas' ? new Canvas() : new Target() }),
     window, location, history, URLSearchParams, navigator: { hardwareConcurrency: cores, clipboard: clipboardWrite ? {
       writeText: async text => { clipboardWrites.push(text); await clipboardWrite(text); },
     } : undefined }, Worker: FakeWorker, URL,
@@ -101,7 +110,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
   const flushFrames = (time = 0) => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(time)); };
-  return { canvas, window, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
+  return { canvas, window, document: documentTarget, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
 }
 function complexAt(view, x, y) {
   return [view.re + scaledFixed(x - 400, view.logScale, view.bits), view.im - scaledFixed(y - 300, view.logScale, view.bits)];
@@ -150,6 +159,110 @@ test('completed pixels survive a high-DPI pan, only exposed strips reach workers
   assert.equal(h.request().id, next.id, 'release must not restart an unchanged raster');
   h.window.emit('wheel', { clientX: 50, clientY: 40, deltaY: -100, deltaMode: 0 }); h.flush();
   assert.equal(h.canvas.dataset.reusedPixels, '0', 'zoom invalidates the old sampling grid');
+});
+
+test('the palette menu lists every palette; choosing one repaints every pixel, and links carry it', () => {
+  const h = harness({ width: 100, height: 80 });
+  assert.equal(h.request().palette, 'classic');
+  const button = h.elements.get('#palette-button'), menu = h.elements.get('#palette-menu');
+  const items = menu.children;
+  assert.deepEqual(items.map(item => item.dataset.palette), ['classic', 'vivid']);
+  assert.deepEqual(items.map(item => item.children[1].textContent), ['Classic', 'Vivid']);
+  assert.match(items[1].children[0].style.background, /^linear-gradient\(90deg, #/);
+  assert.deepEqual(items.map(item => item.attributes['aria-checked']), ['true', 'false']);
+  assert.equal(button.attributes['aria-label'], 'Colour scheme: Classic');
+  completeRegion(h, { x: 0, y: 0, width: 100, height: 80 });
+  // A click opens it; choosing repaints (pixels of another palette are never reused) and keeps it open.
+  button.emit('click');
+  assert.equal(menu.hidden, false);
+  assert.equal(button.attributes['aria-expanded'], 'true');
+  items[1].emit('click'); h.flush();
+  assert.equal(menu.hidden, false, 'still open, to try another');
+  assert.equal(h.request().palette, 'vivid');
+  assert.equal(h.canvas.dataset.reusedPixels, '0');
+  assert.deepEqual(items.map(item => item.attributes['aria-checked']), ['false', 'true']);
+  assert.equal(button.attributes['aria-label'], 'Colour scheme: Vivid');
+  assert.equal(h.location.hash, '#palette=vivid', 'the full view in vivid colours');
+  // Another choice straight away, and back: each repaints; choosing the palette in use changes nothing.
+  items[0].emit('click'); h.flush();
+  assert.equal(h.request().palette, 'classic');
+  items[1].emit('click'); h.flush();
+  const id = h.request().id;
+  items[1].emit('click'); h.flush();
+  assert.equal(h.request().id, id);
+  assert.equal(menu.hidden, false);
+  // Presses inside it don't close it; a press outside does, and so does the button again.
+  h.document.listeners.get('pointerdown').forEach(listener => listener({ target: items[0] }));
+  assert.equal(menu.hidden, false);
+  h.document.listeners.get('pointerdown').forEach(listener => listener({ target: h.canvas }));
+  assert.equal(menu.hidden, true);
+  button.emit('click'); button.emit('click');
+  assert.equal(menu.hidden, true, 'a second click closes it');
+  // From the keyboard: arrows open it on the palette in use and move along it; Escape returns to the button.
+  button.emit('keydown', { key: 'ArrowDown' });
+  assert.equal(h.document.activeElement, items[1]);
+  items[1].emit('keydown', { key: 'ArrowDown' });
+  assert.equal(h.document.activeElement, items[0], 'wraps around');
+  items[0].emit('keydown', { key: 'Escape' });
+  assert.equal(menu.hidden, true);
+  assert.equal(h.document.activeElement, button);
+  // Panning keeps the palette, and reuses its pixels.
+  completeRegion(h, { x: 0, y: 0, width: 100, height: 80 });
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 20, clientY: 20 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 23, clientY: 18 }); h.flush();
+  assert.equal(h.request().palette, 'vivid');
+  assert.ok(Number(h.canvas.dataset.reusedPixels) > 0);
+  h.canvas.emit('pointerup', { pointerId: 1 }); h.flush(); h.flushFrames();
+  h.flush();
+  assert.match(h.location.hash, /^#re=.*&palette=vivid$/);
+  // C takes the next palette (wrapping round); typing in the view dialog does not.
+  h.elements.get('#centre-real').emit('click');
+  h.window.emit('keydown', { key: 'c', code: 'KeyC' });
+  assert.equal(h.request().palette, 'vivid');
+  h.elements.get('#close-view-dialog').emit('click');
+  h.window.emit('keydown', { key: 'c', code: 'KeyC' }); h.flush();
+  assert.equal(h.request().palette, 'classic');
+  assert.doesNotMatch(h.location.hash, /palette/);
+  // An edited link switches it too, and a link with only a palette is the full view.
+  h.location.hash = '#palette=vivid'; h.window.emit('hashchange'); h.flush();
+  assert.equal(h.request().palette, 'vivid');
+  assert.equal(h.request().view.logScale, initialView(100, 80).logScale);
+  assert.deepEqual(items.map(item => item.attributes['aria-checked']), ['false', 'true']);
+});
+
+test('with a mouse, the palette menu also opens on hover and closes shortly after the pointer leaves', () => {
+  const h = harness();
+  h.mediaQueries.forEach(query => { query.matches = true; });
+  const picker = h.elements.get('#palette-picker'), menu = h.elements.get('#palette-menu'), button = h.elements.get('#palette-button');
+  picker.emit('pointerenter', { pointerType: 'mouse' });
+  assert.equal(menu.hidden, false);
+  picker.emit('pointerleave', { pointerType: 'mouse' });
+  picker.emit('pointerenter', { pointerType: 'mouse' }); // back in time, onto the menu
+  h.flush();
+  assert.equal(menu.hidden, false);
+  picker.emit('pointerleave', { pointerType: 'mouse' }); h.flush();
+  assert.equal(menu.hidden, true);
+  // A click while hover-opened keeps it open, also once the pointer leaves.
+  picker.emit('pointerenter', { pointerType: 'mouse' }); button.emit('click');
+  picker.emit('pointerleave', { pointerType: 'mouse' }); h.flush();
+  assert.equal(menu.hidden, false);
+  button.emit('click');
+  // So does choosing a palette in a hover-opened menu: it stays for the next try.
+  picker.emit('pointerenter', { pointerType: 'mouse' });
+  menu.children[1].emit('click');
+  picker.emit('pointerleave', { pointerType: 'mouse' }); h.flush();
+  assert.equal(menu.hidden, false);
+  // Touch never opens it by hovering.
+  button.emit('click');
+  picker.emit('pointerenter', { pointerType: 'touch' });
+  assert.equal(menu.hidden, true);
+});
+
+test('a link naming the vivid palette opens in it', () => {
+  const h = harness({ hash: '#re=-0.75&im=0.1&zoom=50&palette=vivid' });
+  assert.equal(h.request().palette, 'vivid');
+  assert.equal(h.elements.get('#palette-button').attributes['aria-label'], 'Colour scheme: Vivid');
+  assert.equal(harness({ hash: '#re=-0.75&im=0.1&zoom=50&palette=nonsense' }).request().palette, 'classic');
 });
 
 test('unfinished regions are included after a pan; subpixel motion keeps the same job', () => {
@@ -234,7 +347,7 @@ test('native physical resolution is rendered at fractional, Retina and higher pi
 
 test('changing monitor pixel density rebuilds the physical raster without changing the view', () => {
   const h = harness({ dpr: 2 });
-  const before = h.request();
+  const before = h.request(), queries = h.mediaQueries.length;
   h.window.devicePixelRatio = 3;
   h.mediaQueries.at(-1).emit('change');
   const after = h.request();
@@ -242,7 +355,7 @@ test('changing monitor pixel density rebuilds the physical raster without changi
   assert.equal(after.width, 2400);
   assert.equal(after.height, 1800);
   assert.deepEqual(after.view, before.view);
-  assert.equal(h.mediaQueries.length, 2, 'monitor change must re-arm the DPR watcher');
+  assert.equal(h.mediaQueries.length, queries + 1, 'monitor change must re-arm the DPR watcher');
 });
 
 test('reset button restores initial coordinates, zoom and labels after navigation', () => {

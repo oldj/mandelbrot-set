@@ -5,6 +5,7 @@
  */
 import type { View } from '../math/precision.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
+import type { Palette } from './palette-names.ts';
 
 export interface RenderRegion { x: number; y: number; width: number; height: number }
 
@@ -37,6 +38,8 @@ export interface RenderRequest {
   iterations: number;
   regions?: RenderRegion[];
   reference?: ReferencePlan;
+  /** The colour scheme (classic when absent). */
+  palette?: Palette;
   /**
    * Resample only the pixels the finished render `id` left unresolved, at
    * `iterations` (more than before), and send their tiles again.

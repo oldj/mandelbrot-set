@@ -2,14 +2,17 @@
  * The information panel and its controls: the centre coordinates (abbreviated
  * to fit their boxes) and the magnification, which open the view dialog (all
  * digits, copy, edit and apply); copying the view to the clipboard; the reset
- * button, only shown away from the initial view; the zoom buttons; and the
- * keyboard shortcuts (+ and - zoom, 0 and Home reset).
+ * button, only shown away from the initial view; the zoom buttons; the
+ * palette menu; and the keyboard shortcuts (+ and - zoom, 0 and Home reset,
+ * C the next palette).
  * main.ts owns the view; the panel reads it through `current`, is refreshed
  * from each drawn frame, and asks for changes through the callbacks.
  */
 import { initialView, isInitialView } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
+import type { Palette } from '../render/palette-names.ts';
 import { holdToZoom } from './hold-zoom.ts';
+import { createPaletteMenu } from './palette-menu.ts';
 import { formatZoomText } from './url-state.ts';
 import { compactCoordinate, formatCoordinate, viewClipboardText, viewInfo } from './view-info.ts';
 import { readViewFields } from './view-form.ts';
@@ -29,6 +32,9 @@ export interface HudOptions {
   onApply: (view: View) => void;
   /** Zoom about the centre by this log2 scale factor (negative zooms in). */
   onZoom: (logFactor: number) => void;
+  /** The palette in use at first, and the one chosen in the palette menu (or with C, the next one). */
+  palette: Palette;
+  onPalette: (palette: Palette) => void;
 }
 
 export interface Hud {
@@ -36,10 +42,12 @@ export interface Hud {
   update(view: View, cssWidth: number, cssHeight: number): void;
   /** End any zoom the buttons or keys are animating, e.g. before jumping to another view. */
   stopZooming(): void;
+  /** Show the palette in use (after a switch, or one a link named). */
+  setPalette(palette: Palette): void;
   dispose(): void;
 }
 
-export function createHud({ canvas, measure, current, requestDraw, onReset, onApply, onZoom }: HudOptions): Hud {
+export function createHud({ canvas, measure, current, requestDraw, onReset, onApply, onZoom, palette, onPalette }: HudOptions): Hud {
   const infoPanel = document.querySelector<HTMLElement>('#view-info')!;
   const realLabel = document.querySelector<HTMLButtonElement>('#centre-real')!;
   const imaginaryLabel = document.querySelector<HTMLButtonElement>('#centre-imag')!;
@@ -211,11 +219,14 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   });
 
   resetButton.addEventListener('click', onReset);
+  const paletteMenu = createPaletteMenu(document.querySelector<HTMLElement>('#palette-picker')!,
+    document.querySelector<HTMLButtonElement>('#palette-button')!, document.querySelector<HTMLElement>('#palette-menu')!,
+    palette, onPalette);
   const zoomIn = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-in')!, -1, onZoom);
   const zoomOut = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-out')!, 1, onZoom);
 
   // Keyboard shortcuts: + (or =, its unshifted key) and - press the zoom
-  // buttons for as long as they are held; 0 and Home reset the view.
+  // buttons for as long as they are held; 0 and Home reset the view; C takes the next palette.
   /** Each held shortcut by physical key, so releasing Shift before = still ends the + hold. */
   const heldKeys = new Map<string, ReturnType<typeof holdToZoom>>();
   const shortcutZoom = (key: string) => key === '+' || key === '=' ? zoomIn : key === '-' || key === '_' ? zoomOut : undefined;
@@ -235,6 +246,9 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
     } else if (event.key === '0' || event.key === 'Home') {
       event.preventDefault();
       if (!event.repeat) onReset();
+    } else if (event.key === 'c' || event.key === 'C') {
+      event.preventDefault();
+      if (!event.repeat) paletteMenu.cycle();
     }
   };
   const onKeyUp = (event: KeyboardEvent) => {
@@ -258,7 +272,8 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   return {
     update,
     stopZooming,
-    dispose() { stopCopyView(); stopCopyValues(); stopZooming(); },
+    setPalette: next => paletteMenu.set(next),
+    dispose() { stopCopyView(); stopCopyValues(); stopZooming(); paletteMenu.dispose(); },
   };
 }
 
