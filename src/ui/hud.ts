@@ -8,7 +8,7 @@
  * main.ts owns the view; the panel reads it through `current`, is refreshed
  * from each drawn frame, and asks for changes through the callbacks.
  */
-import { initialView, isInitialView } from '../math/precision.ts';
+import { digitScale, initialView, isInitialView } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
 import type { Palette } from '../render/palette-names.ts';
 import { holdToZoom } from './hold-zoom.ts';
@@ -147,8 +147,8 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
     if (!shown) return;
     const { view } = shown, initialLogScale = initialView(shown.cssWidth, shown.cssHeight).logScale;
     opened = { view, initialLogScale, fields: {
-      re: formatCoordinate(view.re, view.bits, view.logScale),
-      im: formatCoordinate(view.im, view.bits, view.logScale),
+      re: formatCoordinate(view.re, view.bits, digitScale(view)),
+      im: formatCoordinate(view.im, view.bits, digitScale(view)),
       zoom: formatZoomText(initialLogScale - view.logScale),
     } };
     for (const name of fields) { inputs[name].value = opened.fields[name]; setError(name, ''); }

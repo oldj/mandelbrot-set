@@ -68,3 +68,28 @@ test('links are refused beyond the deepest zoom, instead of allocating gigabytes
   assert.equal(parseViewHash('#re=0&im=0&zoom=1e18001', initial), undefined);
   assert.equal(parseViewHash('#re=0&im=0&zoom=1e999999999', initial), undefined);
 });
+
+test('setting the zoom back to 1 in the dialog keeps every digit of the centre, for links and copies', async () => {
+  const { typedPlaces } = await import('../src/ui/view-form.ts');
+  const { formatViewHash } = await import('../src/ui/url-state.ts');
+  const { formatCoordinate, viewClipboardText } = await import('../src/ui/view-info.ts');
+  const { digitScale } = await import('../src/math/precision.ts');
+  assert.equal(typedPlaces('-0.75'), 2);
+  assert.equal(typedPlaces('1.25e-3'), 5);
+  assert.equal(typedPlaces('12e3'), 0);
+  const initial = initialView(800, 600).logScale;
+  const deep = parseViewHash('#re=-0.743643887037158704752191506114774&im=0.131825904205311970493132056385139&zoom=1e30', initial);
+  const shown = view => ({ re: formatCoordinate(view.re, view.bits, digitScale(view)), im: formatCoordinate(view.im, view.bits, digitScale(view)), zoom: '1e30' });
+  const fields = shown(deep);
+  const result = readViewFields({ ...fields, zoom: '1' }, fields, deep, initial);
+  assert.equal(result.view.re, deep.re, 'the centre is unchanged');
+  assert.match(formatViewHash(result.view, 800, 600, initial), /^re=-0\.743643887037158704752191506114774/);
+  assert.match(viewClipboardText(result.view, initial), /Center \(Re\): -0\.743643887037158704752191506114774/);
+  // Shown again, the fields hold the same digits; applying them unchanged changes nothing.
+  const again = shown(result.view);
+  assert.equal(again.re, fields.re);
+  assert.deepEqual(readViewFields({ ...again, zoom: '1' }, { ...again, zoom: '1' }, result.view, initial), { view: result.view, changed: false });
+  // A short coordinate typed over it is just as short again.
+  const typed = readViewFields({ ...again, re: '-0.75', im: '0.1', zoom: '1' }, { ...again, zoom: '1' }, result.view, initial);
+  assert.equal(formatViewHash(typed.view, 800, 600, initial), 're=-0.75000000&im=0.10000000&zoom=1');
+});

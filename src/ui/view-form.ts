@@ -4,6 +4,7 @@
  * can't be used.
  */
 import { ensurePrecision } from '../math/precision.ts';
+import { depthOfPlaces } from './view-info.ts';
 import type { View } from '../math/precision.ts';
 import { MAX_DIGITS, MAX_ZOOM_EXPONENT, parseDecimal, parseZoomText } from './url-state.ts';
 
@@ -25,6 +26,14 @@ const NUMBER = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d{1,6}))?$/i;
  * fractional bits; or why it isn't one: not a number, beyond ±4, or longer
  * than a URL could hold.
  */
+/** Decimal places of a coordinate as typed (`1.25e-3` has five), 0 if it is not a number. */
+export function typedPlaces(text: string): number {
+  const match = NUMBER.exec(normalise(text));
+  if (!match) return 0;
+  const [, , , fraction = '', exponent = '0'] = match;
+  return Math.max(0, fraction.length - Number(exponent));
+}
+
 export function parseCoordinateText(text: string, bits: number): bigint | 'invalid' | 'range' | 'digits' {
   const match = NUMBER.exec(normalise(text));
   if (!match) return 'invalid';
@@ -82,8 +91,13 @@ export function readViewFields(fields: ViewFields, shown: ViewFields, view: View
     }
   }
 
-  const next = ensurePrecision(view, logScale);
+  // Every digit shown or typed counts: the view keeps them (its depth), also when zoomed out.
+  // Untouched fields were shown at the view's depth, so they keep it.
+  const places = Math.max(typedPlaces(fields.re), typedPlaces(fields.im));
+  const depth = Math.min(logScale, depthOfPlaces(Math.min(places, MAX_DIGITS)));
+  const next = ensurePrecision(view, depth);
   next.logScale = logScale;
+  next.depth = depth;
   const messages = {
     invalid: 'Enter a decimal number, such as -0.75 or 1.2e-5.',
     range: `Use a value from -${LIMIT} to ${LIMIT}.`,

@@ -11,7 +11,17 @@ export interface View {
   im: bigint;
   bits: number;
   logScale: number; // log2(complex units per CSS pixel)
+  /**
+   * The finest scale (a logScale, ≤ logScale) whose digits the centre carries:
+   * the deepest zoom it has been through, or the digits a link or the view
+   * dialog gave it. Links and copies keep that many digits after zooming out,
+   * so the deep spot can be found again. Absent: just logScale.
+   */
+  depth?: number;
 }
+
+/** The scale coordinates are written at: the view's own, or its depth when finer. */
+export const digitScale = (view: View): number => Math.min(view.logScale, view.depth ?? view.logScale);
 
 const buffer = new DataView(new ArrayBuffer(8));
 
@@ -69,6 +79,8 @@ export function transformView(view: View, oldAnchor: Point, newAnchor: Point, lo
   next.re += scaledFixed(oldAnchor.x, view.logScale, next.bits) - scaledFixed(newAnchor.x, logScale, next.bits);
   next.im += scaledFixed(-oldAnchor.y, view.logScale, next.bits) - scaledFixed(-newAnchor.y, logScale, next.bits);
   next.logScale = logScale;
+  // Zooming out keeps the digits of the deepest scale reached; so do pans (the centre keeps them all).
+  next.depth = Math.min(digitScale(view), logScale);
   return next;
 }
 

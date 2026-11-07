@@ -52,3 +52,27 @@ test('invalid or hostile hashes are rejected', () => {
   const view = transformView(initialView(800, 600), { x: 120, y: -40 }, { x: 0, y: 0 }, -30);
   assert.ok(parseViewHash(`#${formatViewHash(view, 800, 600, initial)}`, initial));
 });
+
+test('a link made after zooming out keeps the deep digits, so a friend zooming back in lands on the same spot', async () => {
+  const { transformView } = await import('../src/math/precision.ts');
+  const { formatCoordinate } = await import('../src/ui/view-info.ts');
+  const initial = initialView(1280, 800).logScale;
+  const deep = parseViewHash('#re=-0.743643887037158704752191506114774&im=0.131825904205311970493132056385139&zoom=1e30', initial);
+  // Zoom out about the centre, all the way, as the buttons do.
+  let out = deep;
+  for (let i = 0; i < 200; i++) out = transformView(out, { x: 0, y: 0 }, { x: 0, y: 0 }, 0.5);
+  assert.ok(out.logScale > deep.logScale + 90);
+  const link = formatViewHash(out, 1280, 800, initial);
+  assert.match(link, /^re=-0\.743643887037158704752191506114774\d*&im=0\.131825904205311970493132056385139\d*&zoom=/, link);
+  // The friend opens it and zooms back in about the centre: the same spot, to a thousandth of a pixel.
+  let friend = parseViewHash(`#${link}`, initial);
+  for (let i = 0; i < 200; i++) friend = transformView(friend, { x: 0, y: 0 }, { x: 0, y: 0 }, -0.5);
+  assert.ok(Math.abs(friend.logScale - deep.logScale) < 1e-9);
+  assert.equal(formatCoordinate(friend.re, friend.bits, deep.logScale), formatCoordinate(deep.re, deep.bits, deep.logScale));
+  assert.equal(formatCoordinate(friend.im, friend.bits, deep.logScale), formatCoordinate(deep.im, deep.bits, deep.logScale));
+  // Passing the link on keeps the same digits: they neither get lost nor grow.
+  const again = parseViewHash(`#${link}`, initial);
+  assert.equal(formatViewHash(again, 1280, 800, initial), link);
+  // Links that never went deep stay as short as their zoom needs.
+  assert.equal(formatViewHash(parseViewHash('#re=-0.75&im=0.1&zoom=50', initial), 1280, 800, initial), 're=-0.75000000&im=0.10000000&zoom=50');
+});

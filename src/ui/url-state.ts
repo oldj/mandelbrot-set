@@ -1,7 +1,7 @@
 /** The view as a shareable URL hash, and back (see formatViewHash). */
-import { ensurePrecision, isInitialView } from '../math/precision.ts';
+import { digitScale, ensurePrecision, isInitialView } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
-import { formatCoordinate } from './view-info.ts';
+import { depthOfPlaces, formatCoordinate } from './view-info.ts';
 import { isPalette } from '../render/palette-names.ts';
 import type { Palette } from '../render/palette-names.ts';
 
@@ -17,8 +17,8 @@ import type { Palette } from '../render/palette-names.ts';
  */
 export function formatViewHash(view: View, width: number, height: number, initialLogScale: number): string {
   if (isInitialView(view, width, height)) return '';
-  const re = formatCoordinate(view.re, view.bits, view.logScale);
-  const im = formatCoordinate(view.im, view.bits, view.logScale);
+  const re = formatCoordinate(view.re, view.bits, digitScale(view));
+  const im = formatCoordinate(view.im, view.bits, digitScale(view));
   return `re=${re}&im=${im}&zoom=${formatZoomText(initialLogScale - view.logScale)}`;
 }
 
@@ -78,7 +78,12 @@ export function parseViewHash(hash: string, initialLogScale: number): View | und
   if (logZoom === undefined || logZoom > MAX_ZOOM_EXPONENT * Math.log2(10)) return undefined;
   // The same zoom-out limit as interactive zooming.
   const logScale = Math.min(2, initialLogScale - logZoom);
-  const view = ensurePrecision({ re: 0n, im: 0n, bits: 128, logScale });
+  // Every digit given counts, also beyond what this zoom needs: a link written after zooming out
+  // still holds the deep spot it came from, and passes it on.
+  const places = Math.max(re.split('.')[1]?.length ?? 0, im.split('.')[1]?.length ?? 0);
+  if (places > MAX_DIGITS) return undefined;
+  const depth = Math.min(logScale, depthOfPlaces(places));
+  const view: View = { ...ensurePrecision({ re: 0n, im: 0n, bits: 128, logScale }, depth), depth };
   const fixedRe = parseDecimal(re, view.bits), fixedIm = parseDecimal(im, view.bits);
   if (fixedRe === undefined || fixedIm === undefined) return undefined;
   // Keep the centre inside the region where the set lives.
