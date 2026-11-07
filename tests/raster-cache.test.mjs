@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimTile, missingRegions, panRaster, shiftQuality } from '../src/render/raster-cache.ts';
+import { claimTile, missingRegions, panRaster, shiftInPlace, shiftQuality } from '../src/render/raster-cache.ts';
 import { ensurePrecision, initialView, toFixed, transformView, viewOffset } from '../src/math/precision.ts';
 import { createSampler } from '../src/fractal/index.ts';
 
@@ -98,5 +98,17 @@ test('reused grid locations still sample the same fractal at extreme depth', asy
       (y - pan.dy + 0.5) * cssHeight / height - cssHeight / 2);
     const next = b.sample((x + 0.5) * cssWidth / width - cssWidth / 2, (y + 0.5) * cssHeight / height - cssHeight / 2);
     assert.ok(Math.abs(previous - next) < 1e-7);
+  }
+});
+
+test('per-pixel samples move in place exactly as quality moves with a pan', () => {
+  const width = 37, height = 23;
+  for (const [dx, dy] of [[0, 0], [5, 0], [-5, 0], [0, 4], [0, -4], [7, 3], [-7, 3], [7, -3], [-7, -3], [36, 22], [-36, -22]]) {
+    const source = new Uint8Array(width * height).map((_, i) => 1 + i % 250);
+    const expected = shiftQuality(source, width, height, dx, dy);
+    const moved = Float32Array.from(source);
+    shiftInPlace(moved, width, height, dx, dy);
+    // Where something moved in, it matches; the strips that scrolled in are left as they were (and are missing).
+    for (let i = 0; i < expected.length; i++) if (expected[i] !== 255) assert.equal(moved[i], expected[i], `${dx},${dy} at ${i}`);
   }
 });

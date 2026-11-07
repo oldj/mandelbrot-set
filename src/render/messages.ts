@@ -24,7 +24,13 @@ export interface ReferencePlan {
 /** Main thread -> worker: a shared orbit, delivered whenever it becomes available. */
 export interface ReferenceDelivery { type: 'reference'; key: number; spec: ReferenceSpec; orbit: OrbitData }
 
-export type RenderCommand = RenderRequest | ReferenceDelivery | { type: 'cancel'; id: number };
+/**
+ * Main thread -> worker: render `id` (under way, or finished and perhaps to be
+ * deepened) continues in another palette; tiles started from now on use it.
+ */
+export interface PaletteSwitch { type: 'palette'; id: number; palette: Palette }
+
+export type RenderCommand = RenderRequest | ReferenceDelivery | PaletteSwitch | { type: 'cancel'; id: number };
 
 export interface RenderRequest {
   id: number;
@@ -60,6 +66,15 @@ export interface TileData {
   edgeRight?: boolean;
   edgeBottom?: boolean;
   pixels: Uint8ClampedArray<ArrayBuffer>;
+  /**
+   * Each sample's smooth escape count (INTERIOR for interior) and outline
+   * distance as a level (see samples.ts), from which any palette gives its
+   * colour: kept so a palette switch need not compute anything again.
+   */
+  counts?: Float32Array<ArrayBuffer>;
+  distances?: Uint8Array<ArrayBuffer>;
+  /** The palette `pixels` are in. */
+  palette?: Palette;
 }
 
 /** Tiles are batched so fast shallow passes don't flood the main thread with messages. */

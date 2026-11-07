@@ -221,6 +221,7 @@ test('outlines use each pixel\'s distance estimate in physical pixels, the same 
   const [first, second] = [startWorker(t), startWorker(t)];
   const tiles = (await Promise.all([collect(first, request), collect(second, { ...request, workerIndex: 1 })])).flat();
   const { createSampler } = await import('../src/fractal/index.ts');
+  const { decodeDistance, encodeDistance } = await import('../src/render/samples.ts');
   const sampler = await createSampler(view, cssWidth, cssHeight, request.iterations, async () => {});
   let shaded = 0, checked = 0;
   for (const tile of tiles.filter(tile => tile.step === 1)) {
@@ -228,8 +229,9 @@ test('outlines use each pixel\'s distance estimate in physical pixels, the same 
     for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
       const x = tile.x + col, y = tile.y + row;
       const value = sampler.sample((x + 0.5) / width * cssWidth - cssWidth / 2, (y + 0.5) / height * cssHeight - cssHeight / 2);
-      // Physical pixels are 2/3 of a CSS pixel here.
-      const expected = shadedWord(value, lastDistance() * 1.5);
+      // Physical pixels are 2/3 of a CSS pixel here. Pixels keep their count in single precision and
+      // their distance as a level (render/samples.ts), and are shaded from those.
+      const expected = shadedWord(Math.fround(value), decodeDistance(encodeDistance(lastDistance() * 1.5)));
       assert.equal(words[row * tile.width + col], expected, `${x},${y}`);
       if (expected !== colorWord(value)) shaded++;
       checked++;
@@ -264,6 +266,54 @@ function paint(image, width, tiles) {
   }
   return image;
 }
+
+test('every tile carries its samples\' counts and distances, from which its palette gives exactly its colours; a switch mid-render takes over', async t => {
+  const { parseViewHash } = await import('../src/ui/url-state.ts');
+  const { paletteShader } = await import('../src/render/palette.ts');
+  const { decodeDistance } = await import('../src/render/samples.ts');
+  const cssWidth = 48, cssHeight = 32, width = 96, height = 64;
+  const view = parseViewHash('#re=-0.730883269553203772&im=0.247817380961806007&zoom=1.827554774e12', initialView(cssWidth, cssHeight).logScale);
+  const base = { view, width, height, cssWidth, cssHeight, workerIndex: 0, workerCount: 1 };
+  const worker = startWorker(t);
+  const check = tiles => {
+    let pixels = 0;
+    for (const tile of tiles) {
+      assert.equal(tile.counts.length, tile.width * tile.height);
+      const shade = paletteShader(tile.palette), words = new Uint32Array(tile.pixels.buffer, tile.pixels.byteOffset, tile.width * tile.height);
+      for (let i = 0; i < words.length; i++) assert.equal(shade(tile.counts[i], decodeDistance(tile.distances[i])), words[i], `${tile.step}: ${tile.x},${tile.y} #${i}`);
+      if (tile.step === 1) pixels += words.length;
+    }
+    return pixels;
+  };
+  for (const palette of ['classic', 'vivid']) {
+    // Including pixels inherited from coarser passes, and those a deepening sends again.
+    const draft = await run(worker, { ...base, id: palette === 'vivid' ? 3 : 1, iterations: 2560, palette });
+    assert.ok(draft.tiles.every(tile => tile.palette === palette));
+    assert.equal(check(draft.tiles), width * height);
+    assert.ok(draft.pass.pending > 0, 'some pixels to deepen');
+    const deepened = await run(worker, { ...base, id: palette === 'vivid' ? 3 : 1, iterations: 10240, palette, deepen: true });
+    assert.ok(check(deepened.tiles) > 0);
+  }
+  // Switched after the coarse pass: later tiles (inherited samples too) are in the new palette, and so is a later deepening.
+  const tiles = [];
+  const done = new Promise(resolve => {
+    const receive = message => {
+      if (message.id !== 5) return;
+      if (message.type === 'tiles') tiles.push(...message.tiles);
+      if (message.type === 'pass' && message.step === 8) worker.postMessage({ type: 'palette', id: 5, palette: 'vivid' });
+      if (message.type === 'pass' && message.step === 1) { worker.off('message', receive); resolve(); }
+    };
+    worker.on('message', receive);
+  });
+  worker.postMessage({ ...base, id: 5, iterations: 2560, palette: 'classic' });
+  await done;
+  check(tiles);
+  assert.ok(tiles.some(tile => tile.palette === 'classic'), 'the coarse pass was classic');
+  assert.ok(tiles.filter(tile => tile.step === 1).every(tile => tile.palette === 'vivid'), 'the final pass is vivid');
+  const deepened = await run(worker, { ...base, id: 5, iterations: 10240, palette: 'classic', deepen: true });
+  assert.ok(deepened.tiles.length && deepened.tiles.every(tile => tile.palette === 'vivid'));
+  check(deepened.tiles);
+});
 
 test('deepening resamples only unresolved pixels and ends identical to rendering at the deeper budget', async t => {
   const { parseViewHash } = await import('../src/ui/url-state.ts');

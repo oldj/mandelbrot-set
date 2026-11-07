@@ -12,15 +12,16 @@ import { adaptBudget, chooseBudget, rememberUse } from './render/budget.ts';
 import type { BudgetMemory } from './render/budget.ts';
 import { gesture, wheelAnchor, wheelLogFactor } from './ui/gestures.ts';
 import { createHud } from './ui/hud.ts';
-import { missingRegions, panRaster, shiftQuality } from './render/raster-cache.ts';
-import { TileStage } from './render/tile-stage.ts';
+import { missingRegions, panRaster, shiftInPlace, shiftQuality } from './render/raster-cache.ts';
+import { decodeDistance } from './render/samples.ts';
+import { stageSamples, TileStage } from './render/tile-stage.ts';
 import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
 import { isPalette } from './render/palette-names.ts';
 import type { Palette } from './render/palette-names.ts';
 import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
 import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
-import type { ReferencePlan, RenderMessage, RenderRequest } from './render/messages.ts';
+import type { ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
 const context = canvas.getContext('2d', { alpha: false });
@@ -101,6 +102,25 @@ let surface: Surface | undefined;
 let quality = new Uint8Array();
 let stage: TileStage | undefined;
 let stageImage: ImageData | undefined;
+/**
+ * Each painted pixel's smooth escape count and outline distance level, as its
+ * tile brought them (see render/samples.ts), spread like its colour; NaN
+ * counts where this surface has painted nothing (a projected preview, or not
+ * yet). A palette switch recolours from them instead of computing anything.
+ * 5 bytes a pixel, allocated with the first tile; pans shift them in place.
+ */
+let samples: { counts: Float32Array; distances: Uint8Array } | undefined;
+
+/** Keep a tile's samples for the pixels it painted. */
+function keepSamples(tile: TileData, regions: RenderRegion[]): void {
+  if (!tile.counts || !stage) return;
+  samples ??= { counts: new Float32Array(stage.width * stage.height).fill(NaN), distances: new Uint8Array(stage.width * stage.height) };
+  stageSamples(tile, regions, samples.counts, samples.distances, stage.width);
+}
+
+/** The palette shaders, loaded on the main thread at the first palette switch (they build colour tables). */
+let shaders: typeof import('./render/palette.ts') | undefined;
+
 // Transparent where nothing is staged, so the upload composites over the preview.
 const uploadCanvas = document.createElement('canvas');
 const uploadContext = uploadCanvas.getContext('2d')!;
@@ -216,6 +236,7 @@ function startRender(): void {
   if (stage?.width !== image.width || stage.height !== image.height) {
     stage = new TileStage(image.width, image.height);
     stageImage = new ImageData(stage.pixels, image.width, image.height);
+    samples = undefined;
     uploadCanvas.width = image.width; uploadCanvas.height = image.height;
   }
   const imageContext = image.getContext('2d', { alpha: false })!;
@@ -225,9 +246,14 @@ function startRender(): void {
     imageContext.imageSmoothingEnabled = false;
     imageContext.drawImage(surface.canvas, pan.dx, pan.dy);
     quality = shiftQuality(quality, image.width, image.height, pan.dx, pan.dy);
+    if (samples) {
+      shiftInPlace(samples.counts, image.width, image.height, pan.dx, pan.dy, NaN);
+      shiftInPlace(samples.distances, image.width, image.height, pan.dx, pan.dy, 0);
+    }
   } else {
     imageContext.setTransform(image.width / cssWidth, 0, 0, image.height / cssHeight, 0, 0);
     if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
+    samples?.counts.fill(NaN);
     // Another palette's preview is only a placeholder: every pass paints over it.
     quality = projectedQuality(surface?.palette === palette ? surface : undefined, completedStep, image.width, image.height);
   }
@@ -403,7 +429,14 @@ function createWorker(): void {
       return;
     }
     // Workers finish passes independently. A late coarse tile must never erase finer pixels.
-    for (const tile of data.tiles) stage!.add(tile, quality);
+    for (const tile of data.tiles) {
+      // Shaded before its worker heard of a palette switch: colour it from its samples instead.
+      if (tile.palette && tile.palette !== palette && tile.counts && tile.distances && shaders) {
+        const shade = shaders.paletteShader(palette), words = new Uint32Array(tile.pixels.buffer, tile.pixels.byteOffset, tile.width * tile.height);
+        for (let i = 0; i < words.length; i++) words[i] = shade(tile.counts[i], decodeDistance(tile.distances[i]));
+      }
+      keepSamples(tile, stage!.add(tile, quality));
+    }
     scheduleDraw();
   };
   worker.onerror = event => {
@@ -484,7 +517,42 @@ function goTo(next: View): void {
   startRender();
 }
 
-/** Switch the colour scheme: every pixel is painted again, and the choice is remembered here. */
+/**
+ * Show the palette in use without computing anything again: colours depend
+ * only on each pixel's count and distance. The render under way (if any)
+ * carries on in it: workers shade the tiles they start from now on with it,
+ * tiles they already shaded are recoloured here as they arrive, and every
+ * pixel painted so far is recoloured from its kept samples. Only a projected
+ * preview (no samples) stays as it is, marked missing so the passes repaint it.
+ */
+async function applyPalette(): Promise<void> {
+  const next = palette;
+  // Nothing kept to recolour from (no tile has arrived): render again.
+  if (!samples) { startRender(); return; }
+  // Workers can switch at once; renders and deepenings requested later carry the palette themselves.
+  workers.forEach((worker, workerIndex) => { if (workerIndex < activeWorkerCount) worker.postMessage({ type: 'palette', id: generation, palette: next }); });
+  if (renderBase) renderBase = { ...renderBase, palette: next };
+  shaders ??= await import('./render/palette.ts');
+  // Superseded meanwhile by another switch, which recolours in turn.
+  if (palette !== next || !surface || !stage) return;
+  flushTiles();
+  const target = surface, { width, height } = stage, shade = shaders.paletteShader(next);
+  if (samples) {
+    const context = target.canvas.getContext('2d')!, image = context.getImageData(0, 0, width, height);
+    const words = new Uint32Array(image.data.buffer), { counts, distances } = samples;
+    for (let i = 0; i < words.length; i++) {
+      if (Number.isNaN(counts[i])) quality[i] = 255;
+      else words[i] = shade(counts[i], decodeDistance(distances[i]));
+    }
+    context.putImageData(image, 0, 0);
+  }
+  target.palette = next;
+  canvas.dataset.palette = next;
+  canvas.dataset.recoloured = String(generation);
+  scheduleDraw();
+}
+
+/** Switch the colour scheme, and remember the choice here. */
 function setPalette(next: Palette): void {
   try { localStorage.setItem(PALETTE_KEY, next); } catch { /* not remembered: still applies now */ }
   if (next === palette) return;
@@ -492,7 +560,7 @@ function setPalette(next: Palette): void {
   hud.setPalette(palette);
   if (!view) return;
   writeHash();
-  startRender();
+  void applyPalette();
 }
 
 // Edited or navigated hashes (back/forward) move the view; replaceState does not fire this.
@@ -505,7 +573,7 @@ window.addEventListener('hashchange', () => {
   if (!new URLSearchParams(location.hash.replace(/^#/, '')).has('re')) { resetView(); return; }
   const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
   if (next) goTo(next);
-  else if (paletteChanged) startRender();
+  else if (paletteChanged) void applyPalette();
 });
 
 function resize(): void {

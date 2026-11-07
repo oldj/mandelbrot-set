@@ -65,7 +65,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
     classList = { add() {}, remove() {} };
     draws = [];
-    context = { setTransform() {}, fillRect() {}, putImageData() {}, measureText: text => ({ width: text.length * 6.6 }), drawImage: (...args) => this.draws.push(args) };
+    context = { setTransform() {}, fillRect() {}, putImageData() {}, getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }), measureText: text => ({ width: text.length * 6.6 }), drawImage: (...args) => this.draws.push(args) };
     constructor() { super(); canvases.push(this); }
     getContext() { return this.context; }
     getBoundingClientRect() { return this.rect; }
@@ -105,7 +105,10 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id),
     requestAnimationFrame: fn => { frames.set(++timerId, fn); return timerId; },
     cancelAnimationFrame: id => frames.delete(id), performance: { now: () => 0 },
-    ImageData: class {}, console,
+    ImageData: class { constructor(data, width, height) {
+      if (typeof data === 'number') { this.width = data; this.height = width; this.data = new Uint8ClampedArray(data * width * 4); }
+      else { this.data = data; this.width = width; this.height = height; }
+    } }, console,
   };
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
@@ -256,6 +259,49 @@ test('with a mouse, the palette menu also opens on hover and closes shortly afte
   button.emit('click');
   picker.emit('pointerenter', { pointerType: 'touch' });
   assert.equal(menu.hidden, true);
+});
+
+test('a finished surface is recoloured from its kept samples, without rendering anything again', async () => {
+  const { paletteShader } = await import('../src/render/palette.ts');
+  const { decodeDistance } = await import('../src/render/samples.ts');
+  const h = harness({ width: 40, height: 24, cores: 2 });
+  const first = h.request(), W = 40, H = 24;
+  // Every pixel final, with its count and distance: a count per column, an outline on one row.
+  const counts = new Float32Array(W * H).map((_, i) => 3000 + (i % W) * 37), distances = new Uint8Array(W * H).map((_, i) => (i / W | 0) === 5 ? 50 : 255);
+  const shade = paletteShader('classic'), pixels = new Uint8ClampedArray(W * H * 4), words = new Uint32Array(pixels.buffer);
+  for (let i = 0; i < words.length; i++) words[i] = shade(counts[i], decodeDistance(distances[i]));
+  const active = h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type);
+  active[0].emit({ type: 'tiles', id: first.id, tiles: [{ x: 0, y: 0, width: W, height: H, step: 1, pixels, counts, distances }] });
+  for (const worker of active) for (const step of [8, 4, 2, 1]) worker.emit({ type: 'pass', id: first.id, step, elapsed: 1, fallbacks: 0, samples: 10, unresolved: 0, pending: 0 });
+  assert.equal(h.canvas.dataset.rendered, 'true');
+  const surface = h.canvases.at(-1), puts = [];
+  surface.context.putImageData = image => puts.push(image);
+  h.elements.get('#palette-button').emit('click');
+  h.elements.get('#palette-menu').children[1].emit('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.request().id, first.id, 'no new render');
+  assert.equal(h.canvas.dataset.palette, 'vivid');
+  assert.equal(puts.length, 1);
+  const vivid = paletteShader('vivid'), recoloured = new Uint32Array(puts[0].data.buffer);
+  for (let i = 0; i < recoloured.length; i++) assert.equal(recoloured[i], vivid(counts[i], decodeDistance(distances[i])), `pixel ${i}`);
+  // A pan keeps the recoloured pixels and their samples, and computes only the strip in the new palette.
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 20, clientY: 12 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 23, clientY: 12 }); h.flush();
+  assert.equal(h.request().palette, 'vivid');
+  assert.equal(Number(h.canvas.dataset.reusedPixels), (W - 3) * H);
+  // Switching while that is unfinished computes nothing again either: the workers carry on in the new palette,
+  // and a tile they shaded in the old one is recoloured from its samples on arrival.
+  const panned = h.request();
+  h.window.emit('keydown', { key: 'c', code: 'KeyC' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.request().id, panned.id, 'no new render');
+  assert.ok(h.workers.some(worker => worker.messages.some(message => message.type === 'palette' && message.id === panned.id && message.palette === 'classic')));
+  const strip = { x: 0, y: 0, width: 3, height: H, step: 1, palette: 'vivid', counts: counts.slice(0, 3 * H), distances: new Uint8Array(3 * H).fill(255),
+    pixels: new Uint8ClampedArray(3 * H * 4) };
+  h.workers[0].emit({ type: 'tiles', id: panned.id, tiles: [strip] });
+  const stripWords = new Uint32Array(strip.pixels.buffer), classic = paletteShader('classic');
+  for (let i = 0; i < stripWords.length; i++) assert.equal(stripWords[i], classic(strip.counts[i], Infinity));
+  assert.equal(h.canvas.dataset.palette, 'classic');
 });
 
 test('a link naming the vivid palette opens in it', () => {

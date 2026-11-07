@@ -106,3 +106,38 @@ export class TileStage {
     this.right = this.bottom = -Infinity;
   }
 }
+
+/**
+ * Keep a tile's samples (escape count and distance level, see samples.ts)
+ * for the pixels it painted, `regions` as TileStage.add returned them,
+ * spreading coarse samples over pixels exactly as their colours are spread.
+ * The kept samples are what a palette switch recolours from.
+ */
+export function stageSamples(tile: TileData, regions: RenderRegion[], counts: Float32Array, distances: Uint8Array, stride: number): void {
+  if (!tile.counts || !tile.distances) return;
+  const { step } = tile, half = step >> 1, lastColumn = tile.width - 1, lastRow = tile.height - 1;
+  const sampleRowAt = (y: number) => Math.min(lastRow, Math.floor((y - tile.y + half) / step));
+  for (const region of regions) {
+    const start = region.x, end = region.x + region.width;
+    for (let y = region.y; y < region.y + region.height; y++) {
+      const sampleRow = sampleRowAt(y), row = sampleRow * tile.width, out = y * stride;
+      if (step === 1) {
+        counts.set(tile.counts.subarray(row + start - tile.x, row + end - tile.x), out + start);
+        distances.set(tile.distances.subarray(row + start - tile.x, row + end - tile.x), out + start);
+        continue;
+      }
+      if (y > region.y && sampleRowAt(y - 1) === sampleRow) {
+        counts.copyWithin(out + start, out - stride + start, out - stride + end);
+        distances.copyWithin(out + start, out - stride + start, out - stride + end);
+        continue;
+      }
+      for (let x = start; x < end;) {
+        const sample = Math.min(lastColumn, Math.floor((x - tile.x + half) / step));
+        const stop = sample === lastColumn ? end : Math.min(end, tile.x - half + (sample + 1) * step);
+        counts.fill(tile.counts[row + sample], out + x, out + stop);
+        distances.fill(tile.distances[row + sample], out + x, out + stop);
+        x = stop;
+      }
+    }
+  }
+}

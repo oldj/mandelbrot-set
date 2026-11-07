@@ -20,11 +20,34 @@ export function panRaster(from: View, to: View, width: number, height: number, c
 /** Shift quality with the pixels, including unfinished progressive passes. */
 export function shiftQuality(source: Uint8Array, width: number, height: number, dx: number, dy: number): Uint8Array<ArrayBuffer> {
   const result = new Uint8Array(width * height).fill(255);
+  shiftInto(source, result, width, height, dx, dy);
+  return result;
+}
+
+/** Copy a per-pixel array into `result` moved by (dx, dy), as pans move the pixels; what scrolls in keeps result's contents. */
+function shiftInto(source: Uint8Array, result: Uint8Array, width: number, height: number, dx: number, dy: number): void {
   const left = Math.max(0, dx), right = Math.min(width, width + dx);
   for (let y = Math.max(0, dy); y < Math.min(height, height + dy); y++) {
     result.set(source.subarray((y - dy) * width + left - dx, (y - dy) * width + right - dx), y * width + left);
   }
-  return result;
+}
+
+/**
+ * Move a per-pixel array by (dx, dy) in place, as pans move the pixels; what
+ * scrolls in is set to `fill`. Rows are visited so that none is overwritten
+ * before it has moved.
+ */
+export function shiftInPlace(array: Uint8Array | Float32Array, width: number, height: number, dx: number, dy: number, fill: number): void {
+  const left = Math.max(0, dx), right = Math.min(width, width + dx);
+  const first = Math.max(0, dy), last = Math.min(height, height + dy) - 1;
+  for (let k = 0; k <= last - first; k++) {
+    const y = dy > 0 ? last - k : first + k;
+    array.copyWithin(y * width + left, (y - dy) * width + left - dx, (y - dy) * width + right - dx);
+    array.fill(fill, y * width, y * width + left);
+    array.fill(fill, y * width + right, (y + 1) * width);
+  }
+  array.fill(fill, 0, first * width);
+  array.fill(fill, (last + 1) * width, height * width);
 }
 
 /**

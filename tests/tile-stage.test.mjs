@@ -96,3 +96,25 @@ test('every coarse step paints like the per-pixel model, also around claimed pix
     }
   }
 });
+
+test('a tile\'s samples are spread over exactly the pixels its colours cover', async () => {
+  const { stageSamples } = await import('../src/render/tile-stage.ts');
+  const width = 61, height = 45;
+  for (const step of [8, 4, 2, 1]) for (const [x, y] of [[0, 0], [16, 8], [48, 32]]) {
+    const columns = Math.ceil(Math.min(32, width - x) / step), rows = Math.ceil(Math.min(32, height - y) / step);
+    // Sample k gets colour word k + 1 and count k, so both can be told apart pixel by pixel.
+    const pixels = new Uint8ClampedArray(columns * rows * 4), words = new Uint32Array(pixels.buffer);
+    words.forEach((_, k) => { words[k] = k + 1; });
+    const tile = { x, y, width: columns, height: rows, step, clipWidth: Math.min(32, width - x), clipHeight: Math.min(32, height - y), pixels,
+      counts: Float32Array.from(words, w => w - 1), distances: Uint8Array.from(words, w => (w - 1) % 256) };
+    const stage = new TileStage(width, height), quality = new Uint8Array(width * height).fill(255);
+    const counts = new Float32Array(width * height).fill(NaN), distances = new Uint8Array(width * height);
+    stageSamples(tile, stage.add(tile, quality), counts, distances, width);
+    const staged = new Uint32Array(stage.pixels.buffer);
+    for (let i = 0; i < staged.length; i++) {
+      if (!staged[i]) { assert.ok(Number.isNaN(counts[i]), `step ${step} at ${i}: no colour, no sample`); continue; }
+      assert.equal(counts[i], staged[i] - 1, `step ${step} at ${i}`);
+      assert.equal(distances[i], (staged[i] - 1) % 256);
+    }
+  }
+});

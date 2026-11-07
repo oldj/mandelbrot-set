@@ -12,11 +12,15 @@
  */
 import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, referenceFromOrbit } from '../fractal/index.ts';
 import { paletteShader } from './palette.ts';
+import { decodeDistance, encodeDistance } from './samples.ts';
 import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
 import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
+import type { Palette } from './palette-names.ts';
 
 let generation = 0;
+/** A palette switch for a render under way (or finished, for its deepening): tiles started after it use it. */
+let switched: { id: number; palette: Palette } | undefined;
 const referenceCache: ReferenceCache = {};
 const CANCELLED = Symbol('cancelled');
 /** Batch finished tiles; each main-thread message and canvas upload has a fixed cost. */
@@ -25,9 +29,12 @@ const FLUSH_MS = 16;
 const TILE_SIZE = 32;
 interface OwnTile {
   x: number; y: number; width: number; height: number; edgeRight: boolean; edgeBottom: boolean;
-  previous?: Uint32Array; previousColumns: number;
-  /** 1 for final pixels that reached the budget unresolved (allocated on the first one), and the tile's final words. */
-  pending?: Uint8Array; final?: Uint32Array;
+  /** The previous pass's colours, escape counts and outline distances (physical pixels), which the next pass inherits. */
+  previous?: Uint32Array; previousCounts?: Float32Array; previousDistances?: Uint8Array; previousColumns: number;
+  /** The palette its colours (previous, final) are in. */
+  palette?: Palette;
+  /** 1 for final pixels that reached the budget unresolved (allocated on the first one), and the tile's final samples. */
+  pending?: Uint8Array; final?: Uint32Array; finalCounts?: Float32Array; finalDistances?: Uint8Array;
 }
 /** The last finished render: its request and the tiles that still have unresolved pixels. */
 let finished: { request: RenderRequest; tiles: OwnTile[] } | undefined;
@@ -54,6 +61,10 @@ let shared: { key: number; promise: Promise<ReferenceEntry> } | undefined;
 let waiting: { key: number; resolve: () => void; reject: (reason: unknown) => void } | undefined;
 
 self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
+  if ('type' in data && data.type === 'palette') {
+    switched = { id: data.id, palette: data.palette };
+    return;
+  }
   if ('type' in data && data.type === 'reference') {
     orbit = { key: data.key, spec: data.spec, data: data.orbit };
     if (waiting?.key === data.key) { waiting.resolve(); waiting = undefined; }
@@ -125,7 +136,7 @@ async function render(request: RenderRequest): Promise<void> {
     if (generation !== request.id) throw CANCELLED;
   };
   const { id, view, width, height, cssWidth, cssHeight, workerIndex, workerCount, iterations } = request;
-  const shade = paletteShader(request.palette);
+  const palette = () => switched?.id === id ? switched.palette : request.palette ?? 'classic';
   const regions = request.regions ?? [{ x: 0, y: 0, width, height }];
   let batch: TileData[] = [], transfer: ArrayBuffer[] = [], lastFlush = started;
   const flush = () => {
@@ -173,8 +184,12 @@ async function render(request: RenderRequest): Promise<void> {
     for (const tile of tiles) {
       await checkpoint();
       const columns = Math.ceil(tile.width / step), rows = Math.ceil(tile.height / step);
+      // The palette at the tile's start colours all of it, and the tile says which it was.
+      const tilePalette = palette(), shade = paletteShader(tilePalette);
       const pixels = new Uint8ClampedArray(columns * rows * 4), words = new Uint32Array(pixels.buffer);
-      const previous = tile.previous, previousColumns = tile.previousColumns;
+      // Each sample's escape count and distance too: final tiles carry them, so the main thread can recolour.
+      const counts = new Float32Array(columns * rows), edges = new Uint8Array(columns * rows);
+      const previous = tile.previous, previousColumns = tile.previousColumns, samePalette = tile.palette === tilePalette;
       for (let row = 0; row < rows; row++) {
         const y = toCss(tile.y + row * step, height, cssHeight);
         // Even rows and columns coincide with the previous (twice as coarse) pass.
@@ -185,7 +200,12 @@ async function render(request: RenderRequest): Promise<void> {
           xs[count++] = toCss(tile.x + col * step, width, cssWidth);
         }
         if (inherit) {
-          for (let col = 0; col < columns; col += 2) words[row * columns + col] = previous[(row >> 1) * previousColumns + (col >> 1)];
+          // Inherited samples are shaded again: the previous pass may have used another palette.
+          for (let col = 0; col < columns; col += 2) {
+            const from = (row >> 1) * previousColumns + (col >> 1), to = row * columns + col;
+            counts[to] = tile.previousCounts![from]; edges[to] = tile.previousDistances![from];
+            words[to] = samePalette ? previous[from] : shade(counts[to], decodeDistance(edges[to]));
+          }
         }
         if (count) {
           if (sampler!.row) {
@@ -206,7 +226,10 @@ async function render(request: RenderRequest): Promise<void> {
             }
           }
           for (let k = 0; k < count; k++) {
-            words[row * columns + targets[k]] = shade(values[k], distances[k] * physical);
+            // Shaded from the kept values (see samples.ts), so recolouring them later gives exactly these colours.
+            const at = row * columns + targets[k];
+            counts[at] = values[k]; edges[at] = encodeDistance(distances[k] * physical);
+            words[at] = shade(counts[at], decodeDistance(edges[at]));
             if (unresolved[k]) (tile.pending ??= new Uint8Array(tile.width * tile.height))[row * step * tile.width + targets[k] * step] = 1;
           }
         }
@@ -215,11 +238,17 @@ async function render(request: RenderRequest): Promise<void> {
       }
       // The pixel buffer is transferred below; keep a copy for the next pass, or for deepening.
       tile.previous = step > 1 ? words.slice() : undefined;
-      if (step === 1 && tile.pending) tile.final = words.slice();
+      tile.previousCounts = step > 1 ? counts : undefined;
+      tile.previousDistances = step > 1 ? edges : undefined;
+      if (step === 1 && tile.pending) { tile.final = words.slice(); tile.finalCounts = counts.slice(); tile.finalDistances = edges.slice(); }
       tile.previousColumns = columns;
+      tile.palette = tilePalette;
       batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height,
-        edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step, pixels });
+        edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step, pixels, palette: tilePalette,
+        // Coarse passes keep theirs for the next pass: send copies.
+        counts: step === 1 ? counts : counts.slice(), distances: step === 1 ? edges : edges.slice() });
       transfer.push(pixels.buffer);
+      transfer.push(batch.at(-1)!.counts!.buffer, batch.at(-1)!.distances!.buffer);
       if (performance.now() - lastFlush >= FLUSH_MS) flush();
     }
     await checkpoint();
@@ -254,7 +283,7 @@ async function deepen(request: RenderRequest): Promise<void> {
     if (generation !== request.id) throw CANCELLED;
   };
   const { id, view, width, height, cssWidth, cssHeight, iterations, reference } = request;
-  const shade = paletteShader(request.palette);
+  const palette = () => switched?.id === id ? switched.palette : request.palette ?? 'classic';
   const tiles = finished?.request.id === id ? finished.tiles : [];
   const source = reference && (() => sharedReference(reference));
   // Worker 0 builds a longer shared orbit even without pixels of its own to deepen: the others wait for it.
@@ -270,7 +299,11 @@ async function deepen(request: RenderRequest): Promise<void> {
   };
   for (const tile of tiles) {
     await checkpoint();
-    const pending = tile.pending!, words = tile.final!;
+    const pending = tile.pending!, words = tile.final!, counts = tile.finalCounts!, edges = tile.finalDistances!;
+    const tilePalette = palette(), shade = paletteShader(tilePalette);
+    // Its kept final colours may be in another palette: shade them all again.
+    if (tile.palette !== tilePalette) for (let i = 0; i < words.length; i++) words[i] = shade(counts[i], decodeDistance(edges[i]));
+    tile.palette = tilePalette;
     for (let row = 0; row < tile.height; row++) {
       let count = 0;
       for (let col = 0; col < tile.width; col++) {
@@ -283,16 +316,18 @@ async function deepen(request: RenderRequest): Promise<void> {
       if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
       else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
       for (let k = 0; k < count; k++) {
-        words[row * tile.width + targets[k]] = shade(values[k], distances[k] * physical);
-        pending[row * tile.width + targets[k]] = unresolved[k];
+        const at = row * tile.width + targets[k];
+        counts[at] = values[k]; edges[at] = encodeDistance(distances[k] * physical);
+        words[at] = shade(counts[at], decodeDistance(edges[at]));
+        pending[at] = unresolved[k];
       }
       samples += count;
       await checkpoint();
     }
-    const pixels = new Uint8ClampedArray(words.slice().buffer);
+    const pixels = new Uint8ClampedArray(words.slice().buffer), sentCounts = counts.slice(), sentDistances = edges.slice();
     batch.push({ x: tile.x, y: tile.y, width: tile.width, height: tile.height, clipWidth: tile.width, clipHeight: tile.height,
-      edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step: 1, pixels });
-    transfer.push(pixels.buffer);
+      edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step: 1, pixels, palette: tilePalette, counts: sentCounts, distances: sentDistances });
+    transfer.push(pixels.buffer, sentCounts.buffer, sentDistances.buffer);
     if (performance.now() - lastFlush >= FLUSH_MS) flush();
   }
   await checkpoint();
