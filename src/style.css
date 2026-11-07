@@ -240,7 +240,7 @@ canvas.dragging { cursor: grabbing; }
 
 .reset-view[hidden] { display: none; }
 
-/* Reset, then zoom in and out, at the bottom right. */
+/* Reset, then zoom out and in, at the bottom right. */
 .view-controls { display: flex; align-items: flex-end; gap: 8px; flex: none; }
 .zoom-button {
   position: relative;
