@@ -24,12 +24,13 @@ function tryHint(hint: CycleHint): boolean {
 
 /** Main cardioid or period-2 bulb, exactly, in fixed point. */
 export function insideFixed(cr: bigint, ci: bigint, bits: number): boolean {
-  const unit = 1n << BigInt(bits);
+  // Powers of two as shifts: the same values as multiplying and dividing by them.
+  const shift = BigInt(bits), unit = 1n << shift;
   const y2 = ci * ci;
-  if ((cr + unit) ** 2n + y2 <= unit * unit / 16n) return true;
+  if ((cr + unit) ** 2n + y2 <= 1n << (2n * shift - 4n)) return true;
   const x = cr - unit / 4n;
   const q = x * x + y2;
-  return q * (q + x * unit) <= y2 * unit * unit / 4n;
+  return q * (q + (x << shift)) <= y2 << (2n * shift - 2n);
 }
 
 /** Sets lastDistance() on escape, in units of `pixel` (the distance from c to c + 1 pixel). */
@@ -276,15 +277,17 @@ export function directRow(cr: Float64Array, ci: number, count: number, limit: nu
 /** Slow correctness path for perturbation glitches, also used as a test oracle. */
 export function directFixed(cr: bigint, ci: bigint, bits: number, limit: number): number {
   if (insideFixed(cr, ci, bits)) return INTERIOR;
-  const shift = BigInt(bits);
+  const shift = BigInt(bits), half = shift - 1n;
   const bailout = 256n << (shift * 2n);
-  let re = 0n, im = 0n;
+  // The squares of z serve both the escape test and the next step (as in
+  // computeOrbit): three multiplications per iteration instead of five.
+  let re = 0n, im = 0n, r2 = 0n, i2 = 0n;
   let savedRe = 0n, savedIm = 0n, checkpoint = 1;
   for (let n = 1; n <= limit; n++) {
-    const r2 = re * re, i2 = im * im;
-    im = ((2n * re * im) >> shift) + ci;
+    im = ((re * im) >> half) + ci;
     re = ((r2 - i2) >> shift) + cr;
-    if (re * re + im * im > bailout) return smooth(n, logMagnitude(fromFixed(re, im, bits)));
+    r2 = re * re; i2 = im * im;
+    if (r2 + i2 > bailout) return smooth(n, logMagnitude(fromFixed(re, im, bits)));
     if (re === savedRe && im === savedIm) return INTERIOR;
     if (n === checkpoint) {
       savedRe = re; savedIm = im; checkpoint *= 2;
