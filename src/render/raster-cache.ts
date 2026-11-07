@@ -27,15 +27,20 @@ export function shiftQuality(source: Uint8Array, width: number, height: number, 
   return result;
 }
 
-/** Merge matching horizontal runs into rectangles, without including valid neighbours. */
-function regionsWhere(quality: Uint8Array, stride: number, bounds: RenderRegion, accepts: (value: number) => boolean): RenderRegion[] {
+/**
+ * Merge matching horizontal runs into rectangles, without including valid
+ * neighbours. `skip(index, end)`, if given, returns the first index from
+ * `index` (before `end`) whose value `accepts`, faster than testing each one.
+ */
+function regionsWhere(quality: Uint8Array, stride: number, bounds: RenderRegion, accepts: (value: number) => boolean,
+  skip?: (index: number, end: number) => number): RenderRegion[] {
   const result: RenderRegion[] = [];
   let previous = new Map<string, RenderRegion>();
   for (let y = bounds.y; y < bounds.y + bounds.height; y++) {
     const current = new Map<string, RenderRegion>();
-    const end = bounds.x + bounds.width;
+    const end = bounds.x + bounds.width, row = y * stride;
     for (let x = bounds.x; x < end;) {
-      if (!accepts(quality[y * stride + x])) { x++; continue; }
+      if (!accepts(quality[row + x])) { x = skip ? skip(row + x, row + end) - row : x + 1; continue; }
       const start = x++;
       while (x < end && accepts(quality[y * stride + x])) x++;
       const key = `${start}:${x - start}`;
@@ -50,8 +55,27 @@ function regionsWhere(quality: Uint8Array, stride: number, bounds: RenderRegion,
   return result;
 }
 
+/** Four finished pixels (quality 1) read as one 32-bit word, in either byte order. */
+const FINISHED_WORD = 0x01010101;
+
+/**
+ * Regions not yet final. After a pan nearly every pixel is final, and a
+ * high-DPI surface has millions: they are skipped four at a time, which keeps
+ * the scan to a fraction of a frame on the main thread.
+ */
 export function missingRegions(quality: Uint8Array, width: number, height: number): RenderRegion[] {
-  return regionsWhere(quality, width, { x: 0, y: 0, width, height }, value => value !== 1);
+  const words = quality.byteOffset % 4 === 0 ? new Uint32Array(quality.buffer, quality.byteOffset, quality.length >> 2) : undefined;
+  const skip = (index: number, end: number) => {
+    while (index < end && quality[index] === 1) {
+      if (words && (index & 3) === 0) {
+        while (index + 4 <= end && words[index >> 2] === FINISHED_WORD) index += 4;
+        if (index >= end || quality[index] !== 1) break;
+      }
+      index++;
+    }
+    return index;
+  };
+  return regionsWhere(quality, width, { x: 0, y: 0, width, height }, value => value !== 1, skip);
 }
 
 /** Whether every pixel of the bounds has a quality value of at least `step`. */

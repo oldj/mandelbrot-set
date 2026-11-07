@@ -24,6 +24,25 @@ test('panning only invalidates exposed strips, in all directions and at the edge
   }
 });
 
+test('missing regions cover exactly the unfinished pixels, whatever the run lengths, widths and byte alignment', () => {
+  // Finished pixels are skipped four at a time: runs of every length at every
+  // alignment, odd widths, and maps that don't start on a 4-byte boundary.
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+  for (const width of [1, 3, 4, 5, 7, 13, 64, 101]) {
+    for (const offset of [0, 1, 2, 3, 4]) {
+      const height = 1 + Math.floor(random() * 9);
+      const quality = new Uint8Array(offset + width * height).subarray(offset);
+      for (let i = 0; i < quality.length;) {
+        const run = 1 + Math.floor(random() ** 2 * 12), value = random() < 0.6 ? 1 : [2, 4, 8, 255][Math.floor(random() * 4)];
+        quality.fill(value, i, i += run);
+      }
+      const covered = coverage(missingRegions(quality, width, height), width, height);
+      assert.ok(covered.every((count, i) => count === (quality[i] === 1 ? 0 : 1)), `width ${width}, offset ${offset}`);
+    }
+  }
+});
+
 test('unfinished quality follows repeated pans; missing areas never overlap valid pixels', () => {
   const width = 79, height = 61;
   let quality = new Uint8Array(width * height).fill(255);
