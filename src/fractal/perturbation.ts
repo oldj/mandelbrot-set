@@ -9,8 +9,8 @@ import { add, extended, linear, logAdd, logMagnitude, magnitude, perturbStep, ZE
 import type { Extended } from '../math/extended.ts';
 import { escapeDistance, INTERIOR, lastSample, smooth } from './escape.ts';
 import {
-  attractingCycle, LOG_ROUNDING, NEWTON_BAND, NEWTON_COST, NEWTON_RETURN_SQUARED, PROOF_START, ROUNDING, SQRT2, TINY_SQUARE,
-  TRAP_BAND, TRAP_RETURN_SQUARED,
+  attractingCycle, attractingCycleExtended, LOG_ROUNDING, LOG_SLACK, NEWTON_BAND, NEWTON_COST, NEWTON_PASSES, NEWTON_RETURN_SQUARED, PROOF_START,
+  provedExtendedCycle, ROUNDING, SQRT2, TINY_SQUARE, TRAP_BAND, TRAP_RETURN_SQUARED,
 } from './interior.ts';
 import { lookupExtended, lookupNative, NATIVE_FIELDS } from './orbit.ts';
 import type { Reference } from './orbit.ts';
@@ -210,9 +210,17 @@ export function perturbNative(reference: Reference, dcRe: number, dcIm: number, 
 
 const negate = (a: Extended): Extended => ({ re: -a.re, im: -a.im, exp: a.exp });
 
+/** NEWTON_BAND and NEWTON_RETURN_SQUARED as log2 of magnitudes: |z| within (3/4, 5/4) of |base| in squares, and within |base| / 2. */
+const LOG_NEWTON_LOW = 0.5 * Math.log2(1 - NEWTON_BAND), LOG_NEWTON_HIGH = 0.5 * Math.log2(1 + NEWTON_BAND);
+const LOG_NEWTON_RETURN = 0.5 * Math.log2(NEWTON_RETURN_SQUARED);
+/** log2 |base| below which proofs get the larger allowance (see perturbExtended). */
+const SMALL_BASE = -10;
+
 /**
- * Extended-exponent perturbation, with the same interior proof as
- * perturbNative; radii are tracked as log2 so they cannot underflow.
+ * Extended-exponent perturbation, with the interior proofs of perturbNative
+ * (a close return's disk check in the loop, attractingCycleExtended on rough
+ * returns); radii are tracked as log2 so they cannot underflow. A proof leaves
+ * its start in provedExtendedCycle for the next pixel.
  */
 export function perturbExtended(reference: Reference, dc: Extended, limit: number, fallback: () => number, stats: SampleStats, logPixel: number): number {
   const orbit = reference.orbit!, orbitLog = reference.orbitLog!;
@@ -223,7 +231,12 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
   const pixelExponent = Math.floor(logPixel), pixel = extended(2 ** (logPixel - pixelExponent), 0, pixelExponent);
   let er = 0, ei = 0, eExp = pixel.exp, lift = pixel.re, zr = 0, zi = 0;
   let base: Extended | undefined, baseLog = Infinity, baseN = 0, reset = 64, collapsedBase = false, retry = 0;
-  let verify = 0, spent = 0, steps = 0, start = ZERO, startError = -Infinity, logRadius0 = -Infinity;
+  // log2 |base| of the last failed proof: the retry backoff holds only for bases not far below it.
+  let failedLog = Infinity, startLog = Infinity, newtonRetry = 0, newtonFails = 0;
+  // The largest |log2 r| of the running proof, for its final margin (see LOG_SLACK).
+  let largest = 0;
+  // The proof's start as orbit state (index and δ), for the next pixel's hint.
+  let verify = 0, spent = 0, steps = 0, start = ZERO, startM = 0, startDelta = ZERO, startPeriod = 0, startError = -Infinity, logRadius0 = -Infinity;
   const logRadii = [-Infinity, -Infinity, -Infinity, -Infinity];
   while (n < limit) {
     steps++;
@@ -238,7 +251,10 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       if (verify) {
         const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];
         const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
-        for (let i = 0; i < 4; i++) logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
+        for (let i = 0; i < 4; i++) {
+          logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
+          largest = Math.max(largest, Math.abs(logRadii[i]));
+        }
       }
       const nextEr = 2 * (zr * er - zi * ei) + lift;
       ei = 2 * (zr * ei + zi * er); er = nextEr;
@@ -262,25 +278,56 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       const error = LOG_ROUNDING + logAdd(logReference, logDelta);
       if (--verify === 0) {
         const distance = logAdd(logMagnitude(add(total, negate(start))), logAdd(startError, error));
-        if (logRadii.some((logRadius, i) => logAdd(distance, logRadius) <= logRadius0 + 8 * i)) return INTERIOR;
-        base = undefined; baseLog = Infinity; collapsedBase = false; retry = 2 * n;
+        // The log2 bookkeeping rounds too (see LOG_SLACK).
+        const slack = startPeriod * (largest + 64) * LOG_SLACK;
+        if (logRadii.some((logRadius, i) => logAdd(distance, logRadius) <= logRadius0 + 8 * i - slack)) {
+          provedExtendedCycle.found = true; provedExtendedCycle.m = startM; provedExtendedCycle.s = startDelta;
+          provedExtendedCycle.period = startPeriod;
+          return INTERIOR;
+        }
+        base = undefined; baseLog = Infinity; collapsedBase = false; retry = 2 * n; failedLog = startLog;
       } else if (rebase) for (let i = 0; i < 4; i++) logRadii[i] = logAdd(logRadii[i], error);
-    } else if (skipped) {
-      // Returns and collapses happen near z = 0, where BLA cannot apply: track single steps only.
     } else if (base) {
+      // Unlike perturbNative, track BLA steps too: deep in a minibrot the
+      // reference orbit itself returns close to 0 every period, and with δ far
+      // below Z there, blocks skip right over the returns. Any start gives a
+      // valid proof, so a start after a block is as sound as one after a step.
       // A return within 2^-10 needs |z| within ~2^-10 of |base|; test that and
       // the cheap eligibility conditions before subtracting extended values.
       const period = n - baseN, collapse = logTotal < baseLog - 10;
-      const eligible = n >= retry && n >= PROOF_START && period > 2 && spent + period <= steps;
+      // Proof work stays within the loop steps executed, as in perturbNative. Around a
+      // return close to 0 (a minibrot's mark), it may also reach an eighth of the
+      // iterations: BLA skips most of each lap there, and steps alone would hold
+      // proofs off for dozens of laps. Returns near repelling cycles (|z| ~ 1–2,
+      // where escaping orbits linger) keep the strict bound. A quarter proved a
+      // few more minibrot edge pixels but made views where proofs keep failing
+      // (cusps, bulb roots) up to 3x slower.
+      const allowance = baseLog < SMALL_BASE ? Math.max(steps, n / 8) : steps;
+      // A rough return first tries attractingCycleExtended (within |base| / 2, |z| within
+      // NEWTON_BAND of |base| in squares), as perturbNative does, with the same backoff.
+      // It gets only the laps the allowance has left: each extended step costs as much
+      // as a loop step, and ten failing laps of a long period would dwarf the pixel's work.
+      if (logTotal - baseLog > LOG_NEWTON_LOW && logTotal - baseLog < LOG_NEWTON_HIGH && n >= newtonRetry
+        && n >= PROOF_START && period > 2 && spent + NEWTON_COST * period <= allowance
+        && logMagnitude(add(total, negate(base))) < baseLog + LOG_NEWTON_RETURN) {
+        const passes = Math.min(NEWTON_PASSES, Math.floor((allowance - spent) / period));
+        const used = attractingCycleExtended(reference, m, delta, dc, logDc, period, passes);
+        if (used < 0) return INTERIOR;
+        spent += used; newtonRetry = n + 4 * period * 2 ** ++newtonFails;
+      }
+      // A failure near a repelling cycle (often where the orbit lingers, |z| ~ 2 near c = -2)
+      // must not hold off a proof around a far smaller |z|, such as a minibrot's returns to 0.
+      const eligible = (n >= retry || baseLog < failedLog - 10) && n >= PROOF_START && period > 2 && spent + period <= allowance;
       const near = eligible && Math.abs(logTotal - baseLog) < 0.002;
       // A collapse starts from its distance to the base too (as in perturbNative): an
       // infinite one would make every radius infinite and the final check vacuous.
       const logDistance = near || (eligible && collapse && collapsedBase) ? logMagnitude(add(total, negate(base))) : Infinity;
       if (eligible && (logDistance < baseLog - 10 || (collapse && collapsedBase))) {
-        verify = period; spent += period; start = total;
+        verify = period; spent += period; start = total; startLog = baseLog; startM = m; startDelta = delta; startPeriod = period;
         startError = LOG_ROUNDING + logAdd(logReference, logDelta);
         logRadius0 = 3 + logAdd(logDistance, startError);
         for (let i = 0; i < 4; i++) logRadii[i] = logRadius0 + 8 * i;
+        largest = Math.max(Math.abs(logRadii[0]), Math.abs(logRadii[3]));
       } else if (logTotal < baseLog || n >= reset) {
         if (n >= reset) reset *= 2;
         collapsedBase = collapse;

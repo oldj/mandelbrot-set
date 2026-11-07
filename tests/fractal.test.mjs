@@ -119,10 +119,11 @@ test('zooming far into an off-centre point rebuilds a reference even when precis
 
 
 /** Nucleus of the period-p component near c, by Newton's method in fixed point. */
-function nucleus(re, im, period, bits) {
+/** A minibrot's centre by Newton on f^period(0) = 0, from a seed given as a double or as fixed point. */
+function nucleus(re, im, period, bits, steps = 64) {
   const B = BigInt(bits), one = 1n << B;
-  let cr = toFixed(re, bits), ci = toFixed(im, bits);
-  for (let step = 0; step < 64; step++) {
+  let cr = typeof re === 'bigint' ? re : toFixed(re, bits), ci = typeof im === 'bigint' ? im : toFixed(im, bits);
+  for (let step = 0; step < steps; step++) {
     let zr = 0n, zi = 0n, dr = 0n, di = 0n;
     for (let n = 0; n < period; n++) {
       const ndr = ((2n * (zr * dr - zi * di)) >> B) + one, ndi = (2n * (zr * di + zi * dr)) >> B;
@@ -191,6 +192,33 @@ test('deep minibrot interiors are proved instead of iterating the whole budget',
   assert.ok(performance.now() - started < 1000, 'running 32768 extended iterations per sample would take far longer');
 });
 
+test('long-period minibrot interiors below 2^-900 are proved, and proved samples never escape', async () => {
+  // A period-250 minibrot near c = -2, about 2^-994 across. At its nucleus
+  // the reference orbit itself returns to |z| ~ 2^-700 every lap, and with δ
+  // far smaller still, BLA blocks step right over those returns: proofs must
+  // look at the end of blocks too, or every interior sample runs its budget.
+  const bits = 1408, one = 1n << BigInt(bits);
+  const centre = nucleus(-2n * one + (one >> 500n), 0n, 250, bits, 400);
+  const inside = ensurePrecision({ ...centre, bits, logScale: -1204 });
+  const limit = iterationBudget(inside.logScale);
+  let sampler = await createSampler(inside, 64, 48, limit, noop);
+  for (let k = 0; k < 24; k++) assert.equal(sampler.sample((k % 6) * 10 - 25, Math.floor(k / 6) * 10 - 15), INTERIOR);
+  assert.equal(sampler.stats.unresolved, 0, 'all proved, none left at the budget');
+  // The whole minibrot: near its edge orbits settle slowly (Newton on rough returns), and
+  // neighbours seed each other's proofs. Proved samples stay bounded for four times the budget.
+  const whole = ensurePrecision({ ...centre, bits, logScale: -998 });
+  sampler = await createSampler(whole, 64, 48, iterationBudget(whole.logScale), noop);
+  let proved = 0, escaped = 0;
+  const edge = [];
+  for (let y = -6.5; y < 7; y += 1.5) for (let x = -12.25; x < 12; x += 1.5) {
+    const before = sampler.stats.unresolved, value = sampler.sample(x, y);
+    if (value !== INTERIOR) { escaped++; continue; }
+    if (sampler.stats.unresolved === before) { proved++; if (Math.abs(x) > 3 || Math.abs(y) > 3) edge.push([x, y]); }
+  }
+  assert.ok(proved > 20 && escaped > 50, `samples on both sides (${proved} proved, ${escaped} escaped)`);
+  for (const [x, y] of edge.slice(0, 3)) assert.equal(oracle(whole, x, y, iterationBudget(whole.logScale) * 4), INTERIOR, `proof at ${x},${y}`);
+});
+
 test('a collapsing orbit below 2^-900 never proves an escaping sample interior', async () => {
   // Near c = -2, a real minibrot centre of period 649 whose critical orbit dives below 2^-13 at
   // step 624 and reaches 0 at 649. View B reuses view A's reference (2^14 shallower), as the app's
@@ -206,6 +234,24 @@ test('a collapsing orbit below 2^-900 never proves an escaping sample interior',
   const sampler = await createSampler(b, 960, 600, limit, noop, cache);
   assert.equal(cache.entry, reference, 'the reference is reused');
   for (const [x, y] of [[3, 0.5], [-2, -6], [7.5, 2]]) close(sampler.sample(x, y), oracle(b, x, y, limit), 1e-6);
+});
+
+test('extended-exponent proofs seeded by a neighbour do not depend on the order pixels are sampled in', async () => {
+  const bits = 1408, one = 1n << BigInt(bits);
+  const view = ensurePrecision({ ...nucleus(-2n * one + (one >> 500n), 0n, 250, bits, 400), bits, logScale: -998 });
+  const xs = Array.from({ length: 40 }, (_, i) => -19.7 + i * 1.01);
+  const run = async order => {
+    const sampler = await createSampler(view, 64, 48, iterationBudget(view.logScale), noop);
+    const results = new Map();
+    for (const x of order) results.set(x, [sampler.sample(x, 0.35), lastDistance()]);
+    return xs.map(x => results.get(x));
+  };
+  const forwards = await run(xs), backwards = await run([...xs].reverse());
+  forwards.forEach((result, i) => {
+    assert.ok(Object.is(result[0], backwards[i][0]) && Object.is(result[1], backwards[i][1]), `x = ${xs[i]}`);
+  });
+  const interior = forwards.filter(([value]) => value === INTERIOR).length;
+  assert.ok(interior > 5 && interior < xs.length - 5, `both sides of the boundary (${interior} interior)`);
 });
 
 /**

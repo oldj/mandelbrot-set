@@ -6,7 +6,8 @@
  * never affected. perturbNative tracks returns of its orbit and decides when
  * to try them; directRow does the same for shallow views.
  */
-import { magnitude } from '../math/extended.ts';
+import { add, extended, logAdd, logMagnitude, magnitude, multiply, ONE, perturbStep, ZERO } from '../math/extended.ts';
+import type { Extended } from '../math/extended.ts';
 import type { Reference } from './orbit.ts';
 
 /**
@@ -56,6 +57,12 @@ export const provedCycle = { found: false, m: 0, sr: 0, si: 0, period: 0 };
 export const HINT_PASSES = 4;
 /** ROUNDING as a log2, for the extended-exponent proofs. */
 export const LOG_ROUNDING = Math.log2(ROUNDING);
+/**
+ * The extended-exponent proofs track radii as log2 values, and those sums and
+ * logAdds round too: by a few units of 2^-52 of the largest |log2 r| per step.
+ * A proof's final comparison keeps this much margin per step and unit of it.
+ */
+export const LOG_SLACK = 2 ** -46;
 
 /**
  * Interior proof for a double-precision orbit at z with candidate period P:
@@ -241,6 +248,97 @@ export function attractingCycle(reference: Reference, m0: number, sr: number, si
     // Newton converges quadratically: the fixed point lies well within one
     // step of the new w, so the disks start at 4x the step, scaled for |λ|.
     radius0 = lambda < 1 ? 4 * (step + startError + Number.MIN_VALUE) / (1 - lambda) : 0;
+  }
+  return spent;
+}
+
+const negate = (a: Extended): Extended => ({ re: -a.re, im: -a.im, exp: a.exp });
+const MINUS_ONE = negate(ONE);
+
+/** a / b for extended values; b normalized and nonzero, so |b|² lies in [1, 8). */
+function divide(a: Extended, b: Extended): Extended {
+  const squared = b.re * b.re + b.im * b.im;
+  return extended((a.re * b.re + a.im * b.im) / squared, (a.im * b.re - a.re * b.im) / squared, a.exp - b.exp);
+}
+
+/**
+ * The start of the last successful extended-exponent proof (attractingCycleExtended, or
+ * perturbExtended's own): orbit index m and δ there, and the period. The next pixel tries
+ * attractingCycleExtended from it first, as provedCycle does for native samples.
+ */
+export const provedExtendedCycle = { found: false, m: 0, s: ZERO as Extended, period: 0 };
+
+/**
+ * attractingCycle for extended-exponent deltas (views below 2^-900), with the
+ * radii as log2 as in perturbExtended's own proof: from w = Z_m0 + s, Newton's
+ * method on f^P(w) = w finds the cycle point, and the disk check proves, with
+ * rounding bounds for every step, that f^P maps a disk around it into itself,
+ * so c is interior. Near a minibrot's edge orbits settle far too slowly for
+ * perturbExtended's close-return proof; this needs only a rough return.
+ * Runs from the orbit state without changing it. Returns the steps spent,
+ * negated when the proof succeeded (provedExtendedCycle then holds the start).
+ */
+export function attractingCycleExtended(reference: Reference, m0: number, s: Extended, dc: Extended, logDc: number,
+  period: number, passes = NEWTON_PASSES): number {
+  const orbit = reference.orbit!, orbitLog = reference.orbitLog!, end = orbit.length - 1;
+  // At the orbit's last point there is no next step: the same w, rebased to the start.
+  if (m0 === end) { s = add(orbit[m0], s); m0 = 0; }
+  const logRadii = [0, 0, 0, 0];
+  let spent = 0, logRadius0 = -Infinity, previousStep = Infinity;
+  for (let pass = 0; pass < passes; pass++) {
+    // One lap from w: f^P(w), its derivative D = (f^P)'(w) = ∏ 2 z_k, and,
+    // after the first pass, bounds on the images of D(w, r) for four radii
+    // (r, 16 r, 256 r, 4096 r), each step r -> r (2|z| + r) plus rounding.
+    const check = pass > 0;
+    const startTotal = add(orbit[m0], s);
+    const startError = LOG_ROUNDING + logAdd(orbitLog[m0], logMagnitude(s));
+    for (let i = 0; i < 4; i++) logRadii[i] = logRadius0 + 4 * i;
+    let m = m0, delta = s, logDelta = logMagnitude(s), derivative = ONE;
+    let total = startTotal, logTotal = logMagnitude(startTotal), largest = Math.abs(logRadius0);
+    for (let k = 0; k < period; k++) {
+      if (check) {
+        const rounding = LOG_ROUNDING + logAdd(logAdd(2 + orbitLog[m] + logDelta, 2 * logDelta), logDc);
+        for (let i = 0; i < 4; i++) {
+          logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logTotal, logRadii[i]), rounding);
+          largest = Math.max(largest, Math.abs(logRadii[i]));
+        }
+      }
+      const product = multiply(total, derivative);
+      derivative = { re: product.re, im: product.im, exp: product.exp + 1 };
+      delta = perturbStep(orbit[m], delta, dc);
+      m++;
+      total = add(orbit[m], delta); logTotal = logMagnitude(total); logDelta = logMagnitude(delta);
+      if (!(logTotal <= 4)) return spent + k;
+      if (logTotal < logDelta || m === end) {
+        // Representing z as Z + δ rounds once more; rebasing makes that the new state.
+        if (check) {
+          const error = LOG_ROUNDING + logAdd(orbitLog[m], logDelta);
+          for (let i = 0; i < 4; i++) logRadii[i] = logAdd(logRadii[i], error);
+        }
+        delta = total; logDelta = logTotal; m = 0;
+      }
+    }
+    spent += period;
+    const gap = add(total, negate(startTotal)), logLambda = logMagnitude(derivative);
+    if (check) {
+      const distance = logAdd(logMagnitude(gap), logAdd(startError, LOG_ROUNDING + logAdd(orbitLog[m], logDelta)));
+      const slack = period * (largest + 64) * LOG_SLACK;
+      if (logRadii.some((logRadius, i) => logAdd(distance, logRadius) < logRadius0 + 4 * i - slack)) {
+        provedExtendedCycle.found = true; provedExtendedCycle.m = m0; provedExtendedCycle.s = s; provedExtendedCycle.period = period;
+        return -spent;
+      }
+    }
+    // Newton for g(w) = f^P(w) - w: w -= g / (D - 1), stopping as attractingCycle does.
+    const slope = add(derivative, MINUS_ONE);
+    if (slope.re === 0 && slope.im === 0) break;
+    const step = divide(gap, slope), logStep = logMagnitude(step), logSize = logMagnitude(startTotal);
+    if (!(logLambda < 0) && !(logStep > logSize - 8)) break;
+    if (!(logStep < previousStep) && pass > 2) break;
+    s = add(s, negate(step));
+    previousStep = logStep;
+    // 4 (step + error) / (1 - λ); never infinite (λ rounding to 1), which would make the check vacuous.
+    logRadius0 = logLambda < 0 ? 2 + logAdd(logStep, startError) - Math.log2(1 - 2 ** logLambda) : -Infinity;
+    if (!Number.isFinite(logRadius0)) logRadius0 = -Infinity;
   }
   return spent;
 }

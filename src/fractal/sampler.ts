@@ -1,13 +1,14 @@
 /**
  * Choosing how to sample a view, and the per-view state that goes with it.
  */
-import { add, extended, ZERO } from '../math/extended.ts';
+import { add, extended, logMagnitude, ZERO } from '../math/extended.ts';
+import type { Extended } from '../math/extended.ts';
 import { fixedToNumber, scaledFixed } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
 import { directDouble, directFixed, directRow, insideFixed } from './direct.ts';
 import type { CycleHint } from './direct.ts';
 import { INTERIOR, lastSample } from './escape.ts';
-import { attractingCycle, HINT_PASSES, provedCycle, ROUNDING } from './interior.ts';
+import { attractingCycle, attractingCycleExtended, HINT_PASSES, provedCycle, provedExtendedCycle, ROUNDING } from './interior.ts';
 import { buildReference, EXTENDED_LOG_SCALE } from './orbit.ts';
 import type { Checkpoint, Reference } from './orbit.ts';
 import { perturbExtended, perturbNative } from './perturbation.ts';
@@ -79,6 +80,7 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
   const scale = 2 ** view.logScale;
   const offsetRe = offset.re * 2 ** offset.exp, offsetIm = offset.im * 2 ** offset.exp;
   let hint: { m: number; sr: number; si: number; period: number } | undefined;
+  let extendedHint: { m: number; s: Extended; period: number } | undefined;
   return { stats, sample(x, y) {
     // Fixed-point is only used per pixel for exact interior tests or detected glitches.
     lastSample.distance = NaN; lastSample.unresolved = false;
@@ -97,7 +99,21 @@ export async function createSampler(view: View, cssWidth: number, cssHeight: num
       if (lastSample.unresolved) stats.unresolved++;
       return value;
     };
-    if (!native) return perturbExtended(reference, add(offset, extended(x * mantissa, -y * mantissa, exponent)), limit, fallback, stats, view.logScale);
+    if (!native) {
+      const dc = add(offset, extended(x * mantissa, -y * mantissa, exponent));
+      provedExtendedCycle.found = false;
+      // As below: the neighbour's proved cycle, refined for this c, before iterating at all.
+      if (extendedHint) {
+        if (attractingCycleExtended(reference, extendedHint.m, extendedHint.s, dc, logMagnitude(dc), extendedHint.period, HINT_PASSES) < 0) {
+          extendedHint = { ...provedExtendedCycle };
+          return INTERIOR;
+        }
+        extendedHint = undefined;
+      }
+      const value = perturbExtended(reference, dc, limit, fallback, stats, view.logScale);
+      if (value === INTERIOR && provedExtendedCycle.found) extendedHint = { ...provedExtendedCycle };
+      return value;
+    }
     const dcRe = offsetRe + x * scale, dcIm = offsetIm - y * scale;
     provedCycle.found = false;
     if (hint) {
