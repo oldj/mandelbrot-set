@@ -78,6 +78,9 @@ export interface RenderProgress {
   /** Samples this worker computed in the pass, and how many reached the budget unresolved. */
   samples: number;
   unresolved: number;
+  /** Time spent sampling in the pass, and the part of it spent on the unresolved samples (ms). */
+  sampleMs?: number;
+  unresolvedMs?: number;
   /** After the final pass or a deepening: this worker's final pixels still unresolved. */
   pending?: number;
   /** Progress of a `deepen` request rather than of a pass. */

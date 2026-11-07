@@ -887,6 +887,39 @@ test('a coarse pass that runs out of iterations re-renders with a raised budget'
   assert.equal(h.request().iterations, first.iterations);
 });
 
+test('a few unresolved coarse samples raise the budget at once when they were cheap, else the draft comes first', () => {
+  const coarse = (h, unresolvedMs) => {
+    const first = h.request();
+    for (const worker of h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type)) {
+      worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 20, sampleMs: 100, unresolvedMs });
+    }
+    return first;
+  };
+  // 2% unresolved, taking 1% of the pass: raised before any full-resolution work, so no black placeholders wait for the draft.
+  let h = harness({ cores: 3 });
+  let first = coarse(h, 1);
+  assert.equal(h.request().id, first.id + 1);
+  assert.equal(h.request().iterations, first.iterations * 4);
+  assert.ok(!h.request().deepen);
+  // The same share taking 40% of the pass (dear samples, as near parabolic points): the draft finishes first.
+  h = harness({ cores: 3 });
+  first = coarse(h, 40);
+  assert.equal(h.request().id, first.id);
+  // Under 1% unresolved is no reason to raise at all; nor are reports without timings.
+  h = harness({ cores: 3 });
+  first = h.request();
+  for (const worker of h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type)) {
+    worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 5, sampleMs: 100, unresolvedMs: 0.1 });
+  }
+  assert.equal(h.request().id, first.id);
+  h = harness({ cores: 3 });
+  first = h.request();
+  for (const worker of h.workers.filter(worker => worker.messages.at(-1).id === first.id && !worker.messages.at(-1).type)) {
+    worker.emit({ type: 'pass', id: first.id, step: 8, elapsed: 1, fallbacks: 0, samples: 1000, unresolved: 20 });
+  }
+  assert.equal(h.request().id, first.id);
+});
+
 test('after zooming, coarse passes do not repaint a sharper projected preview', () => {
   const h = harness({ cores: 3 });
   const finish = (id, steps) => {

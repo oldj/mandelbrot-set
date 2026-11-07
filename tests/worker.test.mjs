@@ -26,6 +26,24 @@ function collect(worker, request) {
   });
 }
 
+test('each pass samples the tiles nearest the canvas centre first, and reports what unresolved samples cost', async t => {
+  const width = 300, height = 200, cssWidth = 300, cssHeight = 200;
+  const view = ensurePrecision({ ...initialView(cssWidth, cssHeight), logScale: initialView(cssWidth, cssHeight).logScale - 1 });
+  const worker = startWorker(t), passes = [];
+  worker.on('message', message => { if (message.type === 'pass') passes.push(message); });
+  const tiles = await collect(worker, { id: 1, view, width, height, cssWidth, cssHeight, iterations: 256, workerIndex: 0, workerCount: 1 });
+  const distance = tile => Math.hypot(tile.x + tile.clipWidth / 2 - width / 2, tile.y + tile.clipHeight / 2 - height / 2);
+  for (const step of [8, 4, 2, 1]) {
+    const order = tiles.filter(tile => tile.step === step).map(distance);
+    assert.ok(order.every((d, i) => i === 0 || d >= order[i - 1] - 1e-9), `step ${step}: centre outwards`);
+  }
+  for (const pass of passes) {
+    assert.ok(pass.sampleMs > 0, `step ${pass.step} timed`);
+    assert.ok(pass.unresolvedMs >= 0 && pass.unresolvedMs <= pass.sampleMs);
+  }
+  assert.ok(passes.some(pass => pass.unresolved > 0 && pass.unresolvedMs > 0), 'the full view at a low budget leaves some unresolved');
+});
+
 test('real workers cover all physical pixels at each pass, including non-multiple edges', async t => {
   const width = 73, height = 51, cssWidth = 60, cssHeight = 43;
   const view = initialView(cssWidth, cssHeight);

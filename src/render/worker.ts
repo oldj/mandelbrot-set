@@ -152,6 +152,11 @@ async function render(request: RenderRequest): Promise<void> {
     }
     tileOffset += tilesX * tilesY;
   }
+  // Nearest the canvas centre first, in every pass: what people look at sharpens first. Each
+  // worker still owns tiles spread over the whole canvas, so they share the centre's work too.
+  const centreX = width / 2, centreY = height / 2;
+  const distance = (tile: OwnTile) => (tile.x + tile.width / 2 - centreX) ** 2 + (tile.y + tile.height / 2 - centreY) ** 2;
+  tiles.sort((a, b) => distance(a) - distance(b));
   const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
   const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
   const targets = new Int32Array(TILE_SIZE), unresolved = new Uint8Array(TILE_SIZE);
@@ -162,6 +167,9 @@ async function render(request: RenderRequest): Promise<void> {
   for (const step of [8, 4, 2, 1]) {
     let samples = 0;
     const unresolvedBefore = sampler?.stats.unresolved ?? 0;
+    // Time spent sampling in this pass, and the part of it that went into samples left unresolved:
+    // the main thread raises the budget at once when that part is small (see main.ts).
+    let sampleMs = 0, unresolvedMs = 0;
     for (const tile of tiles) {
       await checkpoint();
       const columns = Math.ceil(tile.width / step), rows = Math.ceil(tile.height / step);
@@ -180,8 +188,23 @@ async function render(request: RenderRequest): Promise<void> {
           for (let col = 0; col < columns; col += 2) words[row * columns + col] = previous[(row >> 1) * previousColumns + (col >> 1)];
         }
         if (count) {
-          if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
-          else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
+          if (sampler!.row) {
+            const before = performance.now();
+            sampler!.row(xs, count, y, values, distances, unresolved);
+            const rowMs = performance.now() - before;
+            // A row is sampled in one call: share its time out by iterations (an unresolved sample ran them all).
+            let all = 0, left = 0;
+            for (let k = 0; k < count; k++) { const work = unresolved[k] ? iterations : Math.max(1, values[k]); all += work; if (unresolved[k]) left += work; }
+            sampleMs += rowMs; unresolvedMs += rowMs * left / all;
+          } else {
+            for (let k = 0; k < count; k++) {
+              const before = performance.now();
+              values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0;
+              const sampleTime = performance.now() - before;
+              sampleMs += sampleTime;
+              if (unresolved[k]) unresolvedMs += sampleTime;
+            }
+          }
           for (let k = 0; k < count; k++) {
             words[row * columns + targets[k]] = shade(values[k], distances[k] * physical);
             if (unresolved[k]) (tile.pending ??= new Uint8Array(tile.width * tile.height))[row * step * tile.width + targets[k] * step] = 1;
@@ -203,7 +226,7 @@ async function render(request: RenderRequest): Promise<void> {
     flush();
     if (step === 1) finished = { request, tiles: tiles.filter(tile => tile.pending) };
     send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
-      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore,
+      samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore, sampleMs, unresolvedMs,
       pending: step === 1 ? countPending(finished!.tiles) : undefined });
   }
 }

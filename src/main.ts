@@ -37,15 +37,20 @@ let coarseReady = false;
 const passCounts = new Map<number, number>();
 /** Learned iteration budget, and the coarse-pass tally that adapts it. */
 let budgetMemory: BudgetMemory | undefined;
-let coarseSamples = 0, coarseUnresolved = 0;
+let coarseSamples = 0, coarseUnresolved = 0, coarseMs = 0, coarseUnresolvedMs = 0;
 /**
  * A render first finishes at its budget, a full-resolution draft; pixels
  * that ran out of iterations are then deepened at a raised budget, only
- * those, as often as adaptBudget asks. Only when more than DRAFT_LIMIT of the
- * coarse samples run out does the budget rise before any full-resolution
- * work: such a draft would be mostly placeholders.
+ * those, as often as adaptBudget asks. Until then they are black
+ * placeholders. The budget instead rises right after the coarse pass, before
+ * any full-resolution work, when more than DRAFT_LIMIT of the coarse samples
+ * ran out (the draft would be mostly placeholders), or when they took at most
+ * CHEAP_RAISE of the pass's sampling time: they are cheap (BLA skips most of
+ * their iterations, say), so at 4x the budget they add at most ~30% to the
+ * passes, and the placeholders would only make people wait for the whole
+ * draft. Draft-first pays where they are dear, as near parabolic points.
  */
-const DRAFT_LIMIT = 0.25;
+const DRAFT_LIMIT = 0.25, CHEAP_RAISE = 0.1;
 /** Unresolved final pixels reported for the current draft or deepening, and how many workers reported. */
 let pendingPixels = 0, deepenReports = 0;
 /** The budget the running deepening samples at (0: none), and the request it extends. */
@@ -234,7 +239,7 @@ function startRender(): void {
   lastRender = performance.now();
   coarseReady = false;
   passCounts.clear();
-  coarseSamples = coarseUnresolved = 0;
+  coarseSamples = coarseUnresolved = coarseMs = coarseUnresolvedMs = 0;
   pendingPixels = deepenReports = deepenIterations = 0;
   canvas.dataset.rendered = 'false';
   canvas.setAttribute('aria-busy', 'true');
@@ -377,13 +382,17 @@ function createWorker(): void {
       }
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
-      if (data.step === 8) { coarseSamples += data.samples; coarseUnresolved += data.unresolved; }
+      if (data.step === 8) {
+        coarseSamples += data.samples; coarseUnresolved += data.unresolved;
+        coarseMs += data.sampleMs ?? 0; coarseUnresolvedMs += data.unresolvedMs ?? Infinity;
+      }
       if (data.step === 1) pendingPixels += data.pending ?? 0;
       if (count === activeWorkerCount) {
         completedStep = data.step;
         if (data.step === 8) {
           coarseReady = true;
-          if (coarseSamples && coarseUnresolved / coarseSamples > DRAFT_LIMIT) {
+          const cheap = coarseMs > 0 && coarseUnresolvedMs <= CHEAP_RAISE * coarseMs;
+          if (coarseSamples && (coarseUnresolved / coarseSamples > DRAFT_LIMIT || (coarseUnresolved && cheap))) {
             const adapted = adaptBudget(budgetMemory, surface.view.logScale, surface.iterations, coarseSamples, coarseUnresolved);
             budgetMemory = adapted.memory;
             if (adapted.raise) { startRender(); return; }
