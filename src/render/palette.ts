@@ -1,4 +1,5 @@
 import type { Palette } from './palette-names.ts';
+import { VIVID_KEYS } from './vivid-keys.ts';
 
 // The colour scheme of Mandelbrot_sequence_new.gif, recovered from all 475
 // frames of the animation (each frame's view fitted, every flat pixel paired
@@ -187,35 +188,31 @@ export function color(value: number, pixels: Uint8ClampedArray, offset: number):
   pixels.set(scratchBytes, offset);
 }
 
-// The second palette, "vivid", after the colouring of Maths Town's "Eye of the
-// Universe" zoom: a long cycle in which every stretch is a different hue
-// family, so each depth has colours of its own, rather than one gradient
-// that returns every lap. Frame by frame that video shows a hue-tinted dark,
-// clean, saturated tones of one family and a tinted near white; the family
-// changes as the counts rise, and filaments are coloured lines rather than
-// grey ones. Here each family is four tones of one hue, built in OKLCH around
-// the hue's gamut cusp (its most colourful lightness, so yellows are bright
-// and blues deep, both at full colour): dark, cusp, brighter, pale. A short
-// step from one family's pale tone to the next one's dark gives the
-// alternating light and dark rings. Families follow the hues of its first
-// minutes, from the periwinkle of the full view through cyan, copper, magenta,
-// violet, crimson, blue, purple, rose, olive, green, gold, teal, orange, red,
-// mint, indigo, lime, yellow and pink. It shares lapsOf with the classic
-// palette (shallow views stay calm, deep ones advance by a fixed factor of the
-// count), at VIVID_STOPS_PER_LAP tones per lap: a family per 2/3 of a lap,
-// about six per e-fold of the count.
-export const VIVID_HUES = [268, 220, 35, 320, 285, 15, 245, 300, 340, 100, 140, 55, 205, 45, 5, 165, 275, 120, 85, 350];
-/** Each family's tones: [OKLab lightness, or the cusp's lightness plus an offset; share of the chroma in gamut there]. */
-const VIVID_TONES: readonly [number | { cusp: number }, number][] = [[0.25, 0.8], [{ cusp: 0 }, 0.8], [{ cusp: 0.12 }, 0.7], [0.965, 0.35]];
-/** No tone more colourful than this (OKLCH chroma): blues and violets at their cusp would glare. */
-const VIVID_CHROMA_CAP = 0.18;
-/** Width of each step on the position axis: dark → cusp, cusp → brighter, brighter → pale, pale → the next family's dark. */
-const VIVID_STEPS = [1, 1, 1, 0.35];
-export const VIVID_STOPS_PER_LAP = 6;
-/** Where the lowest counts sit: 1.5 stops in, between the first family's cusp and brighter tones (a soft periwinkle). */
-const VIVID_START = 1.5;
+// The second palette, "vivid": the colouring of Maths Town's "Eye of the
+// Universe" zoom, measured from its frames (VIVID_KEYS, from the full view to
+// n ≈ 13900). There every pixel's colour is one fixed function of its escape
+// count, and past the first few hundred counts that function steps with the
+// count itself rather than its logarithm: a light and a dark band about every
+// 200-250 counts, each pair in a hue of its own (cyan, green, crimson, gold,
+// violet, blue, olive, rose …), with no repeat in the measured range. So a
+// deep view whose counts spread over a few hundred shows a few bands of
+// different hues whatever its depth, where a palette cycling in log(n) (as
+// the classic one does past n = 1500) spreads one band over a whole view once
+// counts reach the thousands. Between keys, colours are interpolated in OKLab
+// along log(n + 4). Beyond the measured end the stretch from
+// VIVID_REPEAT_FROM on repeats, with period VIVID_PERIOD in the count; over
+// its last VIVID_SEAM counts the measured colours cross-fade into those one
+// period earlier (where the two are closest, 0.06 apart in OKLab on average),
+// so the repeat has no seam. The video draws no outlines on filaments, and
+// neither does this palette.
+export const VIVID_END = VIVID_KEYS[VIVID_KEYS.length - 1][0];
+export const VIVID_REPEAT_FROM = 5497.5;
+export const VIVID_PERIOD = VIVID_END - VIVID_REPEAT_FROM;
+const VIVID_SEAM = 120;
+/** Table entries per count: a band of the video spans about 400 of them. */
+const VIVID_STEP = 4;
 
-// OKLab and OKLCH (Björn Ottosson's), with sRGB in [0, 255].
+// OKLab (Björn Ottosson's), with sRGB in [0, 255].
 const toLinear = (v: number) => (v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 const toSrgb = (v: number) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.max(0, v) ** (1 / 2.4) - 0.055);
 function oklab(rgb: readonly number[]): [number, number, number] {
@@ -233,87 +230,41 @@ function linearRgb([L, a, b]: readonly number[]): [number, number, number] {
   return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
     -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s];
 }
-const lch = (L: number, C: number, hue: number): [number, number, number] => [L, C * Math.cos(hue * Math.PI / 180), C * Math.sin(hue * Math.PI / 180)];
-const inGamut = (lab: readonly number[]) => linearRgb(lab).every(v => v >= -1e-4 && v <= 1 + 1e-4);
-/** The most chroma sRGB allows at this lightness and hue. */
-function maxChroma(L: number, hue: number): number {
-  let low = 0, high = 0.4;
-  for (let i = 0; i < 24; i++) { const mid = (low + high) / 2; if (inGamut(lch(L, mid, hue))) low = mid; else high = mid; }
-  return low;
-}
-/** The lightness with the most chroma for this hue (its gamut cusp). */
-function cuspLightness(hue: number): number {
-  let best = 0.5, chroma = 0;
-  for (let L = 0.3; L <= 0.95; L += 0.005) { const c = maxChroma(L, hue); if (c > chroma) { best = L; chroma = c; } }
-  return best;
-}
 
-/** The vivid stops in OKLab, family by family from the first one's dark tone. */
-const vividLab = VIVID_HUES.flatMap(hue => {
-  const cusp = cuspLightness(hue);
-  return VIVID_TONES.map(([lightness, share]) => {
-    const L = typeof lightness === 'number' ? lightness : cusp + lightness.cusp;
-    return lch(L, Math.min(VIVID_CHROMA_CAP, maxChroma(L, hue) * share), hue);
-  });
-});
-/** The stops in sRGB (for tests and the menu's swatch). */
-export const VIVID_STOPS: readonly (readonly number[])[] = vividLab.map(lab => linearRgb(lab).map(toSrgb));
-
-/**
- * Within half a pixel of the boundary, the vivid palette moves the colour up to
- * 70% of the way to a deep tone of its own hue, rather than towards black:
- * darkening its pale tones would turn the filaments grey, where the video's
- * are coloured lines (deep teal on pale blue, crimson on pink, a lighter glow
- * on dark grounds).
- */
-const VIVID_EDGE_DEPTH = 0.7;
-const VIVID_OUTLINE_L = 0.32;
-/** Outline tones are kept for every 16th colour entry: hue changes slowly along the cycle. */
-const VIVID_EDGE_SHIFT = 4;
-const VIVID_SIZE = 65536, VIVID_EDGE_SIZE = VIVID_SIZE >> VIVID_EDGE_SHIFT;
-const packWord = (pixel: Uint8ClampedArray, word: Uint32Array, rgb: readonly number[]) => {
-  pixel[0] = rgb[0]; pixel[1] = rgb[1]; pixel[2] = rgb[2]; pixel[3] = 255;
-  return word[0];
-};
-const vividTables = (() => {
-  const count = vividLab.length, widths = Array.from({ length: count }, (_, k) => VIVID_STEPS[k % VIVID_STEPS.length]);
-  const total = widths.reduce((a, b) => a + b, 0);
-  const colours = new Uint32Array(VIVID_SIZE), outlines = new Uint32Array(VIVID_EDGE_SIZE);
+/** The vivid colours for counts 0, 1/VIVID_STEP … VIVID_END, the last cross-faded into the repeat. */
+const vividTable = (() => {
+  const keys = VIVID_KEYS.map(([n, r, g, b]) => [Math.log(n + 4), ...oklab([r, g, b])]);
+  const measured = (n: number) => {
+    const u = Math.log(n + 4);
+    let low = 0, high = keys.length - 1;
+    while (high - low > 1) { const mid = (low + high) >> 1; if (keys[mid][0] <= u) low = mid; else high = mid; }
+    const [u0, ...a] = keys[low], [u1, ...b] = keys[high], t = Math.min(1, Math.max(0, (u - u0) / (u1 - u0)));
+    return [0, 1, 2].map(c => a[c] + (b[c] - a[c]) * t);
+  };
+  const size = Math.round(VIVID_END * VIVID_STEP) + 1, colours = new Uint32Array(size);
   const pixel = new Uint8ClampedArray(4), word = new Uint32Array(pixel.buffer);
-  let segment = 0, start = 0;
-  for (let i = 0; i < VIVID_SIZE; i++) {
-    const x = i / VIVID_SIZE * total;
-    while (x >= start + widths[segment]) start += widths[segment++];
-    // Catmull-Rom through the neighbouring stops, in OKLab.
-    const t = (x - start) / widths[segment], t2 = t * t, t3 = t2 * t;
-    const p0 = vividLab[(segment - 1 + count) % count], p1 = vividLab[segment];
-    const p2 = vividLab[(segment + 1) % count], p3 = vividLab[(segment + 2) % count];
-    const mixed = [0, 1, 2].map(c => 0.5 * (2 * p1[c] + (p2[c] - p0[c]) * t + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2
-      + (3 * p1[c] - p0[c] - 3 * p2[c] + p3[c]) * t3));
-    colours[i] = packWord(pixel, word, linearRgb(mixed).map(toSrgb));
-    // Outlines are drawn towards a deep, saturated tone of the same hue.
-    if ((i & ((1 << VIVID_EDGE_SHIFT) - 1)) === 0) {
-      const hue = Math.atan2(mixed[2], mixed[1]) * 180 / Math.PI;
-      outlines[i >> VIVID_EDGE_SHIFT] = packWord(pixel, word, linearRgb(lch(VIVID_OUTLINE_L, maxChroma(VIVID_OUTLINE_L, hue) * 0.9, hue)).map(toSrgb));
+  pixel[3] = 255;
+  for (let i = 0; i < size; i++) {
+    const n = i / VIVID_STEP;
+    let lab = measured(n);
+    const seam = (n - (VIVID_END - VIVID_SEAM)) / VIVID_SEAM;
+    if (seam > 0) {
+      const t = Math.min(1, seam) ** 2 * (3 - 2 * Math.min(1, seam)), earlier = measured(n - VIVID_PERIOD);
+      lab = lab.map((v, c) => v + (earlier[c] - v) * t);
     }
+    const rgb = linearRgb(lab).map(toSrgb);
+    pixel[0] = rgb[0]; pixel[1] = rgb[1]; pixel[2] = rgb[2];
+    colours[i] = word[0];
   }
-  return { colours, outlines };
+  return colours;
 })();
-const outlineScratch = new Uint32Array(1), outlineBytes = new Uint8ClampedArray(outlineScratch.buffer);
 
-/** The vivid colour with boundary outlines, as shadedWord (distance in screen pixels, NaN if unknown). */
-export function vividWord(value: number, distance: number): number {
+/** The vivid colour, as shadedWord's signature (it draws no outlines, so the distance is unused). */
+export function vividWord(value: number, _distance: number): number {
   if (value === -1) return INTERIOR_WORD;
-  const cycle = vividLab.length;
-  const position = (lapsOf(value) * VIVID_STOPS_PER_LAP + VIVID_START - lapsOf(0) * VIVID_STOPS_PER_LAP) / cycle;
-  const index = Math.min(VIVID_SIZE - 1, Math.floor((position - Math.floor(position)) * VIVID_SIZE));
-  const word = vividTables.colours[index];
-  if (!(distance < EDGE_REACH)) return word;
-  const amount = VIVID_EDGE_DEPTH * (1 - Math.sqrt(distance / EDGE_REACH));
-  outlineScratch[0] = vividTables.outlines[index >> VIVID_EDGE_SHIFT];
-  scratch[0] = word;
-  for (let c = 0; c < 3; c++) scratchClamped[c] = scratchClamped[c] + (outlineBytes[c] - scratchClamped[c]) * amount;
-  return scratch[0];
+  let n = Math.max(0, value);
+  if (n >= VIVID_END) n = VIVID_REPEAT_FROM + (n - VIVID_REPEAT_FROM) % VIVID_PERIOD;
+  return vividTable[Math.round(n * VIVID_STEP)];
 }
 
 /** The shading function of a palette (classic when absent). */

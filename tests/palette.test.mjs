@@ -170,70 +170,37 @@ test('reported 1.18e119 view, nearly white in flat colour, gets clear outlines f
   assert.ok(share(shaded, v => v < 170) > 0.05, `outlined structure (${share(shaded, v => v < 170)})`);
 });
 
-test('the vivid palette: a fixed, continuous function of the count, with a new hue family every stretch', async () => {
-  const { vividWord, VIVID_STOPS, VIVID_STOPS_PER_LAP, paletteShader } = await import('../src/render/palette.ts');
-  const vivid = value => bytes(vividWord(value, NaN));
+test('the vivid palette: a fixed, continuous function of the count, repeating past the measured range', async () => {
+  const { vividWord, VIVID_END, VIVID_PERIOD, VIVID_REPEAT_FROM, paletteShader } = await import('../src/render/palette.ts');
+  const vivid = (value, distance = NaN) => bytes(vividWord(value, distance));
   assert.equal(paletteShader('vivid'), vividWord);
   assert.equal(paletteShader('classic'), shadedWord);
   assert.equal(paletteShader(undefined), shadedWord);
   assert.deepEqual(vivid(INTERIOR), [0, 0, 0]);
-  // Shallow backgrounds (the lowest counts) are periwinkle, as the video's full view.
-  for (const value of [0, 2, 5]) { const [r, g, b] = vivid(value); assert.ok(b > r + 40 && b > g + 30, `${value}: ${vivid(value)}`); }
-  // Continuous: neighbouring counts get neighbouring colours, also across the short step between families.
-  for (let value = 0.01; value < 2e6; value += value < 3000 ? 0.25 : value * 0.0007) {
+  // Continuous: neighbouring counts get neighbouring colours, also across the repeat's seam. (The video's
+  // steepest edges change a few levels per quarter count, the table's spacing.)
+  for (let value = 0.01; value < 2e6; value += value < 3e4 ? 0.25 : value * 0.0007) {
     const before = vivid(value - value * 1e-7 - 0.0005), after = vivid(value + value * 1e-7 + 0.0005);
-    assert.ok(before.every((channel, i) => Math.abs(channel - after[i]) <= 3), `continuous at ${value}`);
+    assert.ok(before.every((channel, i) => Math.abs(channel - after[i]) <= 6), `continuous at ${value}`);
   }
-  // One whole cycle of families, beyond the first lap, is the same again a cycle later.
-  const cycleLaps = VIVID_STOPS.length / VIVID_STOPS_PER_LAP, factor = Math.exp(cycleLaps / LAPS_PER_E_FOLD);
-  for (const base of [2000, 40000]) assert.deepEqual(vivid((base + 4) * factor - 4), vivid(base));
-  // Within that cycle: every family's stretch holds a tinted dark and a tinted light, and the families cover the hue circle.
-  const hue = ([r, g, b]) => { const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min || 1;
-    const h = max === r ? (g - b) / d : max === g ? 2 + (b - r) / d : 4 + (r - g) / d; return ((h * 60) + 360) % 360; };
-  const sweep = Array.from({ length: 8000 }, (_, i) => vivid((2000 + 4) * factor ** (i / 8000) - 4));
-  const families = VIVID_STOPS.length / 4, stretch = sweep.length / families, bins = new Set();
-  for (let f = 0; f < families; f++) {
-    const part = sweep.slice(Math.round(f * stretch), Math.round((f + 1) * stretch));
-    assert.ok(part.some(c => luma(c) < 45) && part.some(c => luma(c) > 200), `family ${f}: dark and light tones`);
-    const vividTone = part.reduce((best, c) => Math.max(...c) - Math.min(...c) > Math.max(...best) - Math.min(...best) ? c : best);
-    bins.add(Math.floor(hue(vividTone) / 30));
+  // Past the measured end, the stretch from VIVID_REPEAT_FROM repeats with a fixed period in the count.
+  assert.ok(VIVID_REPEAT_FROM < VIVID_END && VIVID_PERIOD > 5000);
+  for (let value = VIVID_END; value < 1e6; value += 977.3) assert.deepEqual(vivid(value + VIVID_PERIOD), vivid(value));
+  assert.deepEqual(vivid(VIVID_END + 0.5), vivid(VIVID_REPEAT_FROM + 0.5));
+  // At any depth a spread of 300 counts holds a dark band and a light one: no view of a few hundred counts
+  // is one flat colour, however deep (the classic palette's log-rate cycle gives such views one hue).
+  for (let start = 400; start < 2e6; start = start * 1.07 + 37) {
+    const colours = Array.from({ length: 100 }, (_, i) => vivid(start + 300 * i / 99));
+    assert.ok(colours.some(c => luma(c) < 70) && colours.some(c => luma(c) > 170), `bands in [${start}, ${start + 300}]`);
   }
-  assert.ok(bins.size >= 10, `hues across the families (${bins.size} of 12 bins)`);
-});
-
-test('vivid outlines draw towards a deep tone of the same hue, never towards grey', async () => {
-  const { vividWord } = await import('../src/render/palette.ts');
-  const hue = ([r, g, b]) => { const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min || 1;
-    const h = max === r ? (g - b) / d : max === g ? 2 + (b - r) / d : 4 + (r - g) / d; return ((h * 60) + 360) % 360; };
-  const saturation = ([r, g, b]) => (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
-  let checked = 0, colourful = 0;
-  for (let value = 3000; value < 3000 * Math.E ** 3; value *= 1.0137) {
-    const flat = bytes(vividWord(value, NaN));
-    for (const distance of [0.5, 3, Infinity]) assert.deepEqual(bytes(vividWord(value, distance)), flat);
-    const outlined = bytes(vividWord(value, 0));
-    // Pale, nearly white tones get coloured outlines: darker, and hardly greyer. A deep yellow can only be
-    // olive (sRGB has little room for chroma there), so pale yellows keep about their saturation; blues,
-    // pinks and the like get far more.
-    if (luma(flat) > 200 && saturation(flat) < 0.25) {
-      assert.ok(luma(outlined) < luma(flat) - 60, `${value}: darker (${outlined} vs ${flat})`);
-      assert.ok(saturation(outlined) >= 0.8 * saturation(flat), `${value}: hardly greyer (${outlined} vs ${flat})`);
-      if (saturation(outlined) > saturation(flat) + 0.1) colourful++;
-      checked++;
-    }
-    // The hue stays where the flat colour has one.
-    if (saturation(flat) > 0.25 && saturation(outlined) > 0.25) {
-      const turn = Math.abs(hue(outlined) - hue(flat)) % 360;
-      assert.ok(Math.min(turn, 360 - turn) < 30, `${value}: hue ${hue(flat)} -> ${hue(outlined)}`);
-    }
-  }
-  assert.ok(checked > 10, 'pale tones along three e-folds');
-  assert.ok(colourful > checked * 0.6, `most pale tones get clearly coloured outlines (${colourful} of ${checked})`);
-  assert.deepEqual(bytes(vividWord(INTERIOR, 0)), [0, 0, 0]);
+  // No outlines: the distance to the boundary never changes the colour, as in the video.
+  for (const value of [3, 60, 200, 400, 2000, 9000, 50000]) for (const distance of [0, 0.2, 3, Infinity])
+    assert.deepEqual(vivid(value, distance), vivid(value));
 });
 
 test('every palette has a shader, a name and a menu swatch taken from its own colours', async () => {
   const { PALETTES, PALETTE_INFO } = await import('../src/render/palette-names.ts');
-  const { paletteShader, VIVID_STOPS } = await import('../src/render/palette.ts');
+  const { paletteShader } = await import('../src/render/palette.ts');
   const hex = channels => '#' + channels.map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
   for (const palette of PALETTES) {
     assert.equal(typeof paletteShader(palette), 'function');
@@ -242,6 +209,24 @@ test('every palette has a shader, a name and a menu swatch taken from its own co
   }
   // Classic: the generator's ten stops, which the first lap passes through.
   assert.deepEqual(PALETTE_INFO.classic.swatch, Array.from({ length: 10 }, (_, i) => hex(rgb((32 * i / 10) ** 2 - 4))));
-  // Vivid: its stops from the first family's vivid tone on.
-  assert.deepEqual(PALETTE_INFO.vivid.swatch, VIVID_STOPS.slice(1, 1 + PALETTE_INFO.vivid.swatch.length).map(hex));
+  // Vivid: from the full view through its first bands, at these counts.
+  const { vividWord } = await import('../src/render/palette.ts');
+  const word = w => hex([...new Uint8Array(new Uint32Array([w]).buffer).slice(0, 3)]);
+  assert.deepEqual(PALETTE_INFO.vivid.swatch, [2, 30, 70, 120, 175, 240, 340, 380, 470, 560, 640, 720, 800, 935, 1050, 1230].map(n => word(vividWord(n, NaN))));
+});
+
+test('the vivid colours are the video\'s own, from the full view to n ≈ 13900', async () => {
+  const { vividWord } = await import('../src/render/palette.ts');
+  const vivid = n => bytes(vividWord(n, NaN));
+  // Medians of flat pixels in the video's frames, each frame registered to the plane, against this renderer's
+  // counts: the opening's (0.5-29 s, 3% bins), then deeper frames' (to 240 s, 0.5% bins seen in 4+ frames).
+  for (const [n, expected] of [
+    [1.08, [113, 134, 203]], [3.25, [118, 141, 207]], [6.33, [127, 151, 216]], [10.73, [137, 162, 227]], [17, [155, 184, 244]],
+    [25.94, [190, 209, 246]], [38.69, [208, 223, 246]], [56.87, [232, 238, 247]],
+    [126, [66, 137, 157]], [142.6, [34, 83, 98]], [199.7, [49, 23, 22]], [261.4, [210, 183, 179]], [336.5, [103, 236, 244]],
+    [513.7, [223, 230, 232]], [719.1, [158, 129, 77]], [933.2, [145, 2, 22]], [1501.3, [231, 233, 239]], [2206, [229, 233, 250]],
+    [3406.7, [243, 230, 243]], [4978.7, [20, 35, 30]], [7496.4, [222, 238, 239]], [10736.9, [39, 44, 11]], [12532.9, [231, 238, 245]],
+  ]) assert.ok(vivid(n).every((channel, i) => Math.abs(channel - expected[i]) <= 4), `${n}: ${vivid(n)} vs ${expected}`);
+  // The full view's background is that soft periwinkle.
+  for (const n of [0, 0.5, 2, 5]) { const [r, g, b] = vivid(n); assert.ok(b > r + 40 && b > g + 30, `${n}: ${vivid(n)}`); }
 });

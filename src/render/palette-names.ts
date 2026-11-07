@@ -12,7 +12,7 @@ export interface PaletteInfo {
   name: string;
   /** One line on where the colours come from. */
   note: string;
-  /** Colours along the start of its gradient, for the menu's swatch (tests keep them in step with palette.ts). */
+  /** Colours along the start of its gradient (the counts of a shallow zoom), for the menu's swatch; tests keep them in step with palette.ts. */
   swatch: readonly string[];
 }
 
@@ -25,7 +25,7 @@ export const PALETTE_INFO: Record<Palette, PaletteInfo> = {
   vivid: {
     name: 'Vivid',
     note: 'After Maths Town’s “Eye of the Universe”',
-    swatch: ['#2f4aba', '#5272d8', '#f2f3f7', '#09262e', '#57cff1', '#c9ebf7', '#eef5f7', '#3d1207', '#e95e3c', '#eba08d',
-      '#f7f2f1', '#350c3d', '#bc63d0', '#d995e9', '#f6f1f7', '#200f56', '#5e4bc3', '#7f76dc'],
+    swatch: ['#758bcf', '#c8d9f6', '#e8f1f6', '#549ab0', '#121415', '#b56960', '#53e8f0', '#03626c',
+      '#78627a', '#b6ebd6', '#0d2614', '#a08351', '#dedde9', '#9f0216', '#f6baed', '#f4e1ae'],
   },
 };
