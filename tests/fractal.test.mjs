@@ -191,6 +191,23 @@ test('deep minibrot interiors are proved instead of iterating the whole budget',
   assert.ok(performance.now() - started < 1000, 'running 32768 extended iterations per sample would take far longer');
 });
 
+test('a collapsing orbit below 2^-900 never proves an escaping sample interior', async () => {
+  // Near c = -2, a real minibrot centre of period 649 whose critical orbit dives below 2^-13 at
+  // step 624 and reaches 0 at 649. View B reuses view A's reference (2^14 shallower), as the app's
+  // cache allows; there its pixels see two consecutive collapses of |z| as single steps. A proof
+  // started on a collapse once took its distance to the base as infinite, so every radius was
+  // infinite and the final check passed vacuously: these escaping samples came back INTERIOR.
+  const bits = 1408;
+  const a = { re: -(2n << BigInt(bits)) + 0x5eb852308d51b6c7b300bbe3d570c567c9549aca6cb39dbeccdn, im: 0n, bits, logScale: -1263.0000847945885 };
+  const b = { ...a, re: a.re - 22835963083295358096932575511191922182123945984n, logScale: -1277.0000847945885 };
+  const limit = 41472, cache = {};
+  await createSampler(a, 960, 600, limit, noop, cache);
+  const reference = cache.entry;
+  const sampler = await createSampler(b, 960, 600, limit, noop, cache);
+  assert.equal(cache.entry, reference, 'the reference is reused');
+  for (const [x, y] of [[3, 0.5], [-2, -6], [7.5, 2]]) close(sampler.sample(x, y), oracle(b, x, y, limit), 1e-6);
+});
+
 /**
  * Distance estimate |z| ln|z| / |dz/dc| in pixels, with z in fixed point and
  * dz/dc in doubles with a separate exponent (it reaches 2^2000 here).

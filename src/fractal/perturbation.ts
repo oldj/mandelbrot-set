@@ -273,7 +273,9 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       const period = n - baseN, collapse = logTotal < baseLog - 10;
       const eligible = n >= retry && n >= PROOF_START && period > 2 && spent + period <= steps;
       const near = eligible && Math.abs(logTotal - baseLog) < 0.002;
-      const logDistance = near ? logMagnitude(add(total, negate(base))) : Infinity;
+      // A collapse starts from its distance to the base too (as in perturbNative): an
+      // infinite one would make every radius infinite and the final check vacuous.
+      const logDistance = near || (eligible && collapse && collapsedBase) ? logMagnitude(add(total, negate(base))) : Infinity;
       if (eligible && (logDistance < baseLog - 10 || (collapse && collapsedBase))) {
         verify = period; spent += period; start = total;
         startError = LOG_ROUNDING + logAdd(logReference, logDelta);
