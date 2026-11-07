@@ -33,7 +33,13 @@ export function formatZoomText(logZoom: number): string {
 const DECIMAL = /^([+-]?)(\d+)(?:\.(\d*))?$/;
 const ZOOM = /^(\d+(?:\.\d*)?|\.\d+)(?:e([+-]?\d{1,9}))?$/i;
 /** Generous for 2^-40000-deep coordinates, small enough to keep parsing cheap. */
-const MAX_DIGITS = 20000;
+export const MAX_DIGITS = 20000;
+/**
+ * The deepest zoom a link or the view dialog may ask for, 10^18000: its
+ * coordinates still fit MAX_DIGITS. Precision grows with depth, so a typed
+ * 1e999999999 would otherwise try to allocate gigabytes.
+ */
+export const MAX_ZOOM_EXPONENT = 18000;
 
 /** log2 of a positive decimal magnification such as `3.5`, `4.31e15` or `1e-2`. */
 export function parseZoomText(text: string): number | undefined {
@@ -61,7 +67,7 @@ export function parseViewHash(hash: string, initialLogScale: number): View | und
   const re = params.get('re'), im = params.get('im'), zoom = params.get('zoom');
   if (re === null || im === null || zoom === null) return undefined;
   const logZoom = parseZoomText(zoom);
-  if (logZoom === undefined) return undefined;
+  if (logZoom === undefined || logZoom > MAX_ZOOM_EXPONENT * Math.log2(10)) return undefined;
   // The same zoom-out limit as interactive zooming.
   const logScale = Math.min(2, initialLogScale - logZoom);
   const view = ensurePrecision({ re: 0n, im: 0n, bits: 128, logScale });

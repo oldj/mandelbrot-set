@@ -3,8 +3,8 @@
  * gestures, Home, the URL hash), and render scheduling. Each render gets a
  * fresh off-screen surface, previewed by projecting the previous one; workers
  * (render/worker.ts) fill it with tiles in passes of 8, 4, 2 and 1 pixels,
- * staged and uploaded once per frame (render/tile-stage.ts). The info panel
- * lives in ui/hud.ts.
+ * staged and uploaded once per frame (render/tile-stage.ts). The info panel,
+ * the view dialog and the zoom buttons live in ui/hud.ts.
  */
 import { initialView, transformView, viewOffset } from './math/precision.ts';
 import type { Point, View } from './math/precision.ts';
@@ -172,6 +172,12 @@ function scheduleDraw(): void {
 const hud = createHud({
   canvas, measure: ctx, requestDraw: scheduleDraw, onReset: () => resetView(),
   current: () => view && { view, cssWidth, cssHeight },
+  onApply: next => { goTo(next); writeHash(); },
+  onZoom: logFactor => {
+    if (!view) return;
+    view = transformView(view, { x: 0, y: 0 }, { x: 0, y: 0 }, logFactor);
+    changed();
+  },
 });
 
 function startRender(): void {
@@ -442,17 +448,21 @@ function resetView(): void {
   startRender();
 }
 
-// Edited or navigated hashes (back/forward) move the view; replaceState does not fire this.
-window.addEventListener('hashchange', () => {
-  if (!view) return;
-  if (location.hash.length <= 1) { resetView(); return; }
-  const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
-  if (!next) return;
+/** Jump to an unrelated view (a link, the view dialog): what was learnt about the budget no longer applies. */
+function goTo(next: View): void {
   pointers.clear();
   canvas.classList.remove('dragging');
   view = next;
   budgetMemory = undefined;
   startRender();
+}
+
+// Edited or navigated hashes (back/forward) move the view; replaceState does not fire this.
+window.addEventListener('hashchange', () => {
+  if (!view) return;
+  if (location.hash.length <= 1) { resetView(); return; }
+  const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
+  if (next) goTo(next);
 });
 
 window.addEventListener('keydown', event => {

@@ -50,7 +50,8 @@ canvas.dragging { cursor: grabbing; }
 .site-heading,
 .github-link,
 .view-info,
-.reset-view {
+.reset-view,
+.zoom-button {
   box-sizing: border-box;
   border: 0;
   border-radius: 16px;
@@ -67,7 +68,8 @@ canvas.dragging { cursor: grabbing; }
 .site-heading::before,
 .github-link::before,
 .view-info::before,
-.reset-view::before {
+.reset-view::before,
+.zoom-button::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -237,13 +239,36 @@ canvas.dragging { cursor: grabbing; }
 }
 
 .reset-view[hidden] { display: none; }
+
+/* Reset, then zoom in and out, at the bottom right. */
+.view-controls { display: flex; align-items: flex-end; gap: 8px; flex: none; }
+.zoom-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 14px;
+  color: var(--text-soft);
+  cursor: pointer;
+  /* Held, not scrolled or long-pressed into a menu. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.zoom-button svg { width: 16px; height: 16px; }
+.zoom-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .reset-view svg { width: 13px; height: 13px; flex: none; }
 .reset-view:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 
 /* Glass buttons brighten and lift slightly under the pointer, and press in. */
 @media (hover: hover) {
   .github-link:hover,
-  .reset-view:hover {
+  .reset-view:hover,
+  .zoom-button:hover {
     background-color: rgb(255 255 255 / 0.08);
     color: var(--text);
     box-shadow: 0 16px 36px rgb(0 0 0 / 0.3), 0 2px 6px rgb(0 0 0 / 0.2), inset 0 1px 0 rgb(255 255 255 / 0.16);
@@ -251,7 +276,9 @@ canvas.dragging { cursor: grabbing; }
   }
 }
 .github-link:active,
-.reset-view:active { transform: translateY(0) scale(0.97); background-color: rgb(255 255 255 / 0.12); }
+.reset-view:active,
+.zoom-button:active,
+.zoom-button.holding { transform: translateY(0) scale(0.97); background-color: rgb(255 255 255 / 0.12); }
 .view-info dl {
   display: grid;
   /* The zoom is short and always shown in full; the coordinates abbreviate to fit the rest. */
@@ -276,7 +303,8 @@ canvas.dragging { cursor: grabbing; }
   letter-spacing: 0.01em;
 }
 
-#zoom-level { flex: none; overflow: visible; color: var(--accent); }
+.view-info dd.zoom-value { flex: none; overflow: visible; }
+#zoom-level { width: auto; color: var(--accent); }
 
 .coordinate-value {
   display: block;
@@ -297,10 +325,12 @@ canvas.dragging { cursor: grabbing; }
 .coordinate-value:hover { color: #c4ecff; text-decoration: underline; text-decoration-color: rgb(196 236 255 / 0.5); text-underline-offset: 3px; }
 .coordinate-value:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
-.coordinate-dialog {
+.view-dialog {
   box-sizing: border-box;
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
   border: 1px solid rgb(255 255 255 / 0.16);
   border-radius: 18px;
@@ -311,17 +341,18 @@ canvas.dragging { cursor: grabbing; }
   backdrop-filter: blur(28px) saturate(170%) brightness(0.7);
   font: 12px/1.6 system-ui, sans-serif;
 }
-.coordinate-dialog::backdrop {
+.view-dialog::backdrop {
   background: rgb(2 7 19 / 0.4);
   -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .coordinate-dialog { background: #101b2b; }
+  .view-dialog { background: #101b2b; }
   .copy-feedback { background: #101d2ef5; }
 }
-.coordinate-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.coordinate-dialog h2 { margin: 0; font-size: 15px; font-weight: 500; }
+.view-dialog form { margin: 0; }
+.view-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.view-dialog h2 { margin: 0; font-size: 15px; font-weight: 500; }
 .dialog-close {
   display: grid;
   place-items: center;
@@ -338,29 +369,48 @@ canvas.dragging { cursor: grabbing; }
 }
 .dialog-close svg { width: 14px; height: 14px; }
 .dialog-close:hover { background: var(--chip-hover); color: var(--text); }
-.coordinate-dialog :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-#coordinate-hint { margin: 10px 0 12px; color: var(--text-muted); }
-.coordinate-dialog-body {
-  max-height: 55dvh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  border: 1px solid rgb(255 255 255 / 0.07);
-  border-radius: 12px;
-  background: rgb(0 4 12 / 0.45);
-}
-#coordinate-full {
+.view-dialog :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.view-dialog-hint { margin: 10px 0 14px; color: var(--text-muted); }
+
+.view-field { display: grid; gap: 5px; }
+.view-field + .view-field { margin-top: 12px; }
+.view-field label { color: var(--text-soft); font-size: 11.5px; }
+.view-input {
+  box-sizing: border-box;
+  width: 100%;
   margin: 0;
-  padding: 12px;
-  font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
+  padding: 8px 12px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+  background: rgb(0 4 12 / 0.45);
+  color: var(--text);
+  font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+  transition: border-color 160ms ease, background-color 160ms ease;
 }
-/* Below the digits, at the dialog's bottom left: the copy button, with its status to the right. */
-.coordinate-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; min-height: 32px; }
-.dialog-copy {
+/* Long coordinates wrap anywhere and grow their box (hud.ts), up to a cap, then scroll. */
+textarea.view-input {
+  display: block;
+  max-height: 32dvh;
+  resize: none;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  overscroll-behavior: contain;
+}
+.view-input:hover { border-color: rgb(255 255 255 / 0.18); }
+.view-input:focus { border-color: rgb(159 216 255 / 0.55); background: rgb(0 4 12 / 0.6); outline: none; }
+.view-dialog .view-input:focus-visible { outline: none; }
+.view-input[aria-invalid="true"] { border-color: #ff9f9f; }
+.field-hint { margin: 0; color: var(--text-muted); font-size: 11px; }
+.field-error { margin: 0; color: #ffb4b4; font-size: 11.5px; }
+.field-error:empty { display: none; }
+
+/* Copy at the bottom left with its status beside it; Apply at the right. */
+.view-dialog-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; min-height: 32px; }
+.dialog-copy,
+.dialog-apply {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   flex: none;
   height: 32px;
@@ -379,8 +429,17 @@ canvas.dragging { cursor: grabbing; }
 .dialog-copy .copy-check { display: none; }
 .dialog-copy[data-state="copied"] .copy-icon { display: none; }
 .dialog-copy[data-state="copied"] .copy-check { display: block; }
-.coordinate-copy-feedback { color: var(--text-muted); }
-.dialog-copy[data-state="copied"] + .coordinate-copy-feedback { color: #a4e8ca; }
+.view-copy-feedback { flex: 1; min-width: 0; color: var(--text-muted); }
+.dialog-copy[data-state="copied"] + .view-copy-feedback { color: #a4e8ca; }
+.dialog-apply {
+  margin-left: auto;
+  min-width: 76px;
+  padding: 0 16px;
+  border-color: rgb(159 216 255 / 0.4);
+  background: rgb(159 216 255 / 0.16);
+  color: var(--text);
+}
+.dialog-apply:hover { background: rgb(159 216 255 / 0.26); }
 
 @media (max-width: 640px) {
   /* Full-width coordinates along the bottom; reset sits above them, still on the right. */
@@ -410,12 +469,14 @@ canvas.dragging { cursor: grabbing; }
 
 @media (pointer: coarse) {
   .reset-view { min-height: 44px; }
+  .zoom-button { width: 44px; height: 44px; }
   .copy-view { width: 44px; height: 44px; }
   .dialog-close { width: 44px; height: 44px; }
-  .dialog-copy { height: 44px; }
+  .dialog-copy, .dialog-apply { height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .dialog-close, .dialog-copy { transition: none; }
-  .github-link:hover, .reset-view:hover, .github-link:active, .reset-view:active, .copy-view:active { transform: none; }
+  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .dialog-close, .dialog-copy, .dialog-apply, .view-input, .zoom-button { transition: none; }
+  .github-link:hover, .reset-view:hover, .github-link:active, .reset-view:active, .copy-view:active,
+  .zoom-button:hover, .zoom-button:active, .zoom-button.holding { transform: none; }
 }

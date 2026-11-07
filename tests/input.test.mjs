@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { build } from 'esbuild';
 import { scaledFixed, viewOffset } from '../src/math/precision.ts';
+import { initialView } from '../src/math/precision.ts';
+import { EASE_MS, HOLD_RATE, MAX_FRAME_MS, STEP } from '../src/ui/hold-zoom.ts';
+import { formatZoomText, parseDecimal } from '../src/ui/url-state.ts';
 import { formatCoordinate } from '../src/ui/view-info.ts';
 
 // Run the actual browser entry point with deterministic input/worker transports.
@@ -25,10 +28,22 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   class Target {
     listeners = new Map();
     textContent = '';
+    value = '';
     dataset = {};
+    style = {};
+    attributes = {};
+    classes = new Set();
+    classList = { add: name => this.classes.add(name), remove: name => this.classes.delete(name) };
     clientWidth = 120;
     open = false;
+    focused = false;
     showModal() { this.open = true; }
+    focus() { this.focused = true; }
+    select() { this.focused = true; }
+    setAttribute(key, value) { this.attributes[key] = value; }
+    removeAttribute(key) { delete this.attributes[key]; }
+    setPointerCapture() {}
+    requestSubmit() { this.emit('submit'); }
     close() { if (this.open) { this.open = false; this.emit('close'); } }
     addEventListener(type, callback) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
@@ -61,7 +76,8 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     emit(data) { this.onmessage({ data }); }
   }
   const canvas = new Canvas(), window = new Target();
-  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#reset-view', '#copy-view', '#copy-feedback', '#coordinate-dialog', '#coordinate-title', '#coordinate-full', '#close-coordinate', '#copy-coordinate', '#coordinate-copy-feedback'].map(id => [id, new Target()])]);
+  const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#view-controls', '#reset-view', '#zoom-in', '#zoom-out', '#copy-view', '#copy-feedback',
+    '#view-dialog', '#view-form', '#close-view-dialog', '#view-re', '#view-im', '#view-zoom', '#view-re-error', '#view-im-error', '#view-zoom-error', '#copy-view-values', '#view-copy-feedback'].map(id => [id, new Target()])]);
   canvas.rect = { left: 0, top: 0, right: width, bottom: height, width, height };
   window.devicePixelRatio = dpr;
   const globals = {
@@ -84,7 +100,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   };
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
-  const flushFrames = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); };
+  const flushFrames = (time = 0) => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(time)); };
   return { canvas, window, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
 }
 function complexAt(view, x, y) {
@@ -280,7 +296,7 @@ test('clipboard denial and unavailable API show failure, never false success', a
   }
 });
 
-test('abbreviated coordinates open full values while clipboard retains the complete view', async () => {
+test('abbreviated coordinates open one dialog with every digit and the zoom, and the clipboard keeps the complete view', async () => {
   const h = harness();
   for (let i = 0; i < 80; i++) h.window.emit('wheel', { clientX: 200, clientY: 200, deltaY: -600, deltaMode: 0 });
   h.flush(); h.flushFrames();
@@ -290,70 +306,219 @@ test('abbreviated coordinates open full values while clipboard retains the compl
   assert.ok(real.length > 40);
   assert.ok(h.elements.get('#centre-real').textContent.includes('…'));
   assert.ok(h.elements.get('#centre-imag').textContent.includes('…'));
+  const dialog = h.elements.get('#view-dialog');
+  // Re, Im and the zoom all open the same dialog, filled with all three values.
+  for (const opener of ['#centre-real', '#centre-imag', '#zoom-level']) {
+    h.elements.get(opener).emit('click');
+    assert.equal(dialog.open, true, opener);
+    assert.equal(h.elements.get('#view-re').value, real);
+    assert.equal(h.elements.get('#view-im').value, imaginary);
+    assert.equal(h.elements.get('#view-zoom').value, formatZoomText(initialView(800, 600).logScale - view.logScale));
+    h.elements.get('#close-view-dialog').emit('click');
+    assert.equal(dialog.open, false);
+  }
   h.elements.get('#centre-real').emit('click');
-  assert.equal(h.elements.get('#coordinate-dialog').open, true);
-  assert.equal(h.elements.get('#coordinate-title').textContent, 'Center · real part (Re)');
-  assert.equal(h.elements.get('#coordinate-full').textContent, real);
-  assert.equal(h.elements.get('#coordinate-dialog').emit('wheel').stopped, true);
+  assert.equal(dialog.emit('wheel').stopped, true);
   const id = h.request().id;
   h.window.emit('keydown', { key: 'Home' });
   assert.equal(h.request().id, id, 'reading the dialog must not reset the background view');
-  h.elements.get('#close-coordinate').emit('click');
-  assert.equal(h.elements.get('#coordinate-dialog').open, false);
-  h.elements.get('#centre-imag').emit('click');
-  assert.equal(h.elements.get('#coordinate-full').textContent, imaginary);
-  h.elements.get('#close-coordinate').emit('click');
+  h.elements.get('#close-view-dialog').emit('click');
   await h.elements.get('#copy-view').listeners.get('click')[0]();
   assert.ok(h.clipboardWrites[0].includes(`Center (Re): ${real}\nCenter (Im): ${imaginary}`));
   assert.ok(!h.clipboardWrites[0].includes('…'));
 });
 
-test('the coordinate dialog copies exactly the full value shown, and failures say so', async () => {
+test('the view dialog copies the whole view, as the panel button does, and failures say so', async () => {
   const h = harness();
   for (let i = 0; i < 80; i++) h.window.emit('wheel', { clientX: 200, clientY: 200, deltaY: -600, deltaMode: 0 });
   h.flush(); h.flushFrames();
-  const view = h.request().view;
   h.elements.get('#centre-imag').emit('click');
-  const button = h.elements.get('#copy-coordinate'), feedback = h.elements.get('#coordinate-copy-feedback');
+  const button = h.elements.get('#copy-view-values'), feedback = h.elements.get('#view-copy-feedback');
   await button.listeners.get('click')[0]();
-  assert.deepEqual(h.clipboardWrites, [formatCoordinate(view.im, view.bits, view.logScale)]);
+  await h.elements.get('#copy-view').listeners.get('click')[0]();
+  assert.equal(h.clipboardWrites.length, 2);
+  assert.equal(h.clipboardWrites[0], h.clipboardWrites[1]);
+  assert.match(h.clipboardWrites[0], /Center \(Re\): .*\nCenter \(Im\): .*\nZoom: /);
   assert.equal(button.dataset.state, 'copied');
   assert.equal(feedback.textContent, 'Copied');
-  // Closing the dialog clears its feedback for the next coordinate.
-  h.elements.get('#close-coordinate').emit('click');
+  // Closing the dialog clears its feedback for next time.
+  h.elements.get('#close-view-dialog').emit('click');
   assert.equal(feedback.textContent, '');
   assert.equal(button.dataset.state, 'idle');
   const denied = harness({ clipboardWrite: async () => { throw new Error('Permission denied'); } });
   denied.elements.get('#centre-real').emit('click');
-  await denied.elements.get('#copy-coordinate').listeners.get('click')[0]();
-  assert.equal(denied.elements.get('#copy-coordinate').dataset.state, 'error');
-  assert.match(denied.elements.get('#coordinate-copy-feedback').textContent, /Couldn’t copy/);
+  await denied.elements.get('#copy-view-values').listeners.get('click')[0]();
+  assert.equal(denied.elements.get('#copy-view-values').dataset.state, 'error');
+  assert.match(denied.elements.get('#view-copy-feedback').textContent, /Couldn’t copy/);
 });
 
-test('a click on the backdrop closes the coordinate dialog, but not one inside it or a drag out of it', () => {
+test('applying the view dialog goes to the typed position and zoom', () => {
   const h = harness();
-  const dialog = h.elements.get('#coordinate-dialog'), digits = h.elements.get('#coordinate-full');
-  dialog.getBoundingClientRect = () => ({ left: 100, top: 200, right: 660, bottom: 400 });
-  const press = (target, x, y) => {
-    dialog.emit('pointerdown', { target, clientX: x, clientY: y });
-    return (x2 = x, y2 = y) => dialog.emit('click', { target, clientX: x2, clientY: y2 });
-  };
+  h.flush();
+  const before = h.request();
+  const dialog = h.elements.get('#view-dialog');
+  const re = h.elements.get('#view-re'), im = h.elements.get('#view-im'), zoom = h.elements.get('#view-zoom');
+  const apply = () => h.elements.get('#view-form').emit('submit');
+
+  // Applying untouched values only closes the dialog.
   h.elements.get('#centre-real').emit('click');
-  assert.equal(dialog.open, true);
-  // The dialog's own padding is the dialog element too, and stays open.
-  press(dialog, 110, 210)();
-  assert.equal(dialog.open, true);
-  // Clicks on its content stay open.
-  press(digits, 300, 300)();
-  assert.equal(dialog.open, true);
-  // Selecting digits and releasing outside the box stays open.
-  press(dialog, 110, 210)(30, 30);
-  assert.equal(dialog.open, true);
-  press(digits, 300, 300)(30, 30);
-  assert.equal(dialog.open, true);
-  // A press and release on the backdrop closes it.
-  press(dialog, 30, 30)();
+  apply();
   assert.equal(dialog.open, false);
+  assert.equal(h.request().id, before.id);
+
+  h.elements.get('#centre-real').emit('click');
+  re.value = '-0.743643887037158704752191506114774'; im.value = '0.131825904205311970493132056385139'; zoom.value = '2.5e12';
+  apply();
+  assert.equal(dialog.open, false);
+  const moved = h.request();
+  assert.notEqual(moved.id, before.id);
+  const initial = initialView(800, 600).logScale;
+  near(initial - moved.view.logScale, Math.log2(2.5e12));
+  // Every typed digit counts, beyond those the panel shows at this depth.
+  assert.equal(moved.view.re, parseDecimal(re.value, moved.view.bits));
+  assert.equal(moved.view.im, parseDecimal(im.value, moved.view.bits));
+  assert.match(h.location.hash, /^#re=-0\.7436438870371587\d*&im=0\.13182590420531197\d*&zoom=2\.5e12$/);
+
+  // Changing only the zoom keeps the exact centre, not the rounded digits shown.
+  h.elements.get('#zoom-level').emit('click');
+  zoom.value = '1.84×10^8';
+  apply();
+  const zoomed = h.request().view;
+  near(initial - zoomed.logScale, Math.log2(1.84e8));
+  const shift = BigInt(zoomed.bits - moved.view.bits);
+  assert.equal(zoomed.re, moved.view.re << shift);
+  assert.equal(zoomed.im, moved.view.im << shift);
+});
+
+test('invalid values in the view dialog are reported and change nothing', () => {
+  const h = harness();
+  h.flush();
+  const before = h.request().id;
+  const dialog = h.elements.get('#view-dialog');
+  const re = h.elements.get('#view-re'), im = h.elements.get('#view-im'), zoom = h.elements.get('#view-zoom');
+  h.elements.get('#centre-real').emit('click');
+  re.value = '-0.75'; im.value = '0.1.2'; zoom.value = '-3';
+  h.elements.get('#view-form').emit('submit');
+  assert.equal(dialog.open, true, 'the dialog stays open');
+  assert.equal(h.request().id, before, 'no render: not even the valid real part is applied');
+  assert.equal(h.elements.get('#view-re-error').textContent, '');
+  assert.match(h.elements.get('#view-im-error').textContent, /decimal number/);
+  assert.match(h.elements.get('#view-zoom-error').textContent, /positive number/);
+  assert.equal(im.attributes['aria-invalid'], 'true');
+  assert.equal(im.focused, true, 'focus moves to the first invalid field');
+  // Typing in a field clears its message.
+  im.value = '0.1'; im.emit('input');
+  assert.equal(h.elements.get('#view-im-error').textContent, '');
+  assert.equal(im.attributes['aria-invalid'], undefined);
+  zoom.value = '1e99999';
+  h.elements.get('#view-form').emit('submit');
+  assert.match(h.elements.get('#view-zoom-error').textContent, /up to 1e18000/);
+  assert.equal(h.request().id, before);
+  // Enter in a coordinate box applies, once the values are valid.
+  zoom.value = '100';
+  re.emit('keydown', { key: 'Enter' });
+  assert.equal(dialog.open, false);
+  assert.notEqual(h.request().id, before);
+});
+
+test('zoom buttons animate about the centre: a step per tap, steady while held, gliding to a stop', () => {
+  const h = harness();
+  h.flush();
+  const start = h.request().view;
+  const zoomIn = h.elements.get('#zoom-in'), zoomOut = h.elements.get('#zoom-out');
+  // The current view: flushing timers starts the render that carries it.
+  const zoomed = () => { h.flush(); return start.logScale - h.request().view.logScale; };
+  let time = 1000;
+  const frames = (ms, step = 16) => { for (const end = time + ms; time < end;) h.flushFrames(time += step); };
+
+  // A tap: nothing jumps on the press; the step eases out over a few frames, then stops at exactly √2.
+  zoomIn.emit('pointerdown', { pointerId: 7, pointerType: 'mouse', button: 0 });
+  assert.equal(zoomed(), 0, 'no jump on press');
+  frames(16);
+  frames(16);
+  const early = zoomed();
+  assert.ok(early > 0 && early < STEP / 2, `eases in over frames, not at once: ${early}`);
+  zoomIn.emit('pointerup', { pointerId: 7 });
+  zoomIn.emit('click', { detail: 1 }); // the pointer's own click adds nothing
+  frames(1000);
+  near(zoomed(), STEP);
+  // The centre stays put.
+  const shift = BigInt(h.request().view.bits - start.bits);
+  assert.equal(h.request().view.re, start.re << shift);
+  assert.equal(h.request().view.im, start.im << shift);
+  // A click held a little past the point where the step slows to the held
+  // speed zooms a little more, smoothly, but doesn't add a whole glide on top.
+  let before = zoomed();
+  zoomIn.emit('pointerdown', { pointerId: 10, pointerType: 'mouse', button: 0 });
+  frames(120, 8);
+  zoomIn.emit('pointerup', { pointerId: 10 });
+  frames(1000);
+  const slowClick = zoomed() - before;
+  assert.ok(slowClick > STEP && slowClick < STEP + 0.75 * HOLD_RATE * EASE_MS / 1000, `slow click: ${slowClick}`);
+  // Settled: no more frames are asked for.
+  const id = h.request().id;
+  frames(200); h.flush();
+  assert.equal(h.request().id, id);
+
+  // A hold: the step flows into steady zooming at HOLD_RATE, every frame a little.
+  before = zoomed();
+  zoomIn.emit('pointerdown', { pointerId: 8, pointerType: 'mouse', button: 0 });
+  frames(16);
+  let previous = zoomed(), largestFrame = 0;
+  for (let i = 0; i < 60; i++) {
+    frames(16);
+    const now = zoomed();
+    assert.ok(now > previous, 'zooms on every frame while held');
+    largestFrame = Math.max(largestFrame, now - previous);
+    previous = now;
+  }
+  assert.ok(largestFrame < STEP / 4, `no frame jumps: ${largestFrame}`);
+  const steadyFrom = zoomed();
+  frames(1000, 20);
+  near(zoomed() - steadyFrom, HOLD_RATE);
+  // A late frame catches up, but a long stall zooms no more than MAX_FRAME_MS would.
+  const beforeStall = zoomed();
+  h.flushFrames(time += 5000);
+  near(zoomed() - beforeStall, HOLD_RATE * MAX_FRAME_MS / 1000);
+  // Released, it glides: decelerating, and covering what easing out from HOLD_RATE does.
+  const released = zoomed();
+  zoomIn.emit('pointerup', { pointerId: 8 });
+  frames(16);
+  const first = zoomed() - released;
+  frames(16);
+  const second = zoomed() - released - first;
+  assert.ok(first > second && second > 0, 'decelerates');
+  assert.ok(first < HOLD_RATE * 0.016 * 1.2, 'starts at about the held speed');
+  frames(1000);
+  near(zoomed() - released, HOLD_RATE * EASE_MS / 1000);
+
+  // Keyboard: Enter held acts like a held pointer; its clicks add nothing. Space taps a step.
+  before = zoomed();
+  zoomOut.emit('keydown', { key: ' ' });
+  zoomOut.emit('keyup', { key: ' ' });
+  zoomOut.emit('click', { detail: 0 });
+  frames(1000);
+  near(zoomed() - before, -STEP);
+  before = zoomed();
+  zoomOut.emit('keydown', { key: 'Enter' }); zoomOut.emit('click', { detail: 0 });
+  frames(16);
+  for (let i = 0; i < 40; i++) { zoomOut.emit('keydown', { key: 'Enter', repeat: true }); zoomOut.emit('click', { detail: 0 }); frames(16); }
+  const keyHeld = before - zoomed();
+  assert.ok(keyHeld > STEP && keyHeld < STEP + HOLD_RATE * 0.7, `key repeats don't pile up steps: ${keyHeld}`);
+  zoomOut.emit('keyup', { key: 'Enter' });
+  frames(1000);
+  // A click with no key behind it (assistive technology) is one step.
+  before = zoomed();
+  zoomOut.emit('click', { detail: 0 });
+  frames(1000);
+  near(zoomed() - before, -STEP);
+
+  // Other mouse buttons don't press it; wheel over the controls doesn't zoom the fractal.
+  before = zoomed();
+  zoomOut.emit('pointerdown', { pointerId: 9, pointerType: 'mouse', button: 2 });
+  frames(200);
+  assert.equal(zoomed(), before);
+  assert.equal(h.elements.get('#view-controls').emit('wheel').stopped, true);
 });
 
 test('coordinate labels adapt to available width without changing the view', () => {

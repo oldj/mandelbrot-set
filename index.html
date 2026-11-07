@@ -42,9 +42,9 @@
     <div class="hud-bottom">
     <section id="view-info" class="view-info" aria-label="Current view">
       <dl>
-        <div><dt title="Real part of the center">Re</dt><dd><button id="centre-real" class="coordinate-value" type="button" aria-label="Show the full real part of the center" aria-haspopup="dialog" aria-controls="coordinate-dialog" title="Show all digits"></button></dd></div>
-        <div><dt title="Imaginary part of the center">Im</dt><dd><button id="centre-imag" class="coordinate-value" type="button" aria-label="Show the full imaginary part of the center" aria-haspopup="dialog" aria-controls="coordinate-dialog" title="Show all digits"></button></dd></div>
-        <div><dt>Zoom</dt><dd id="zoom-level" title="Magnification relative to the full view"></dd></div>
+        <div><dt title="Real part of the center">Re</dt><dd><button id="centre-real" class="coordinate-value" type="button" aria-label="Real part of the center: show all digits or edit" aria-haspopup="dialog" aria-controls="view-dialog" title="Show all digits or edit"></button></dd></div>
+        <div><dt title="Imaginary part of the center">Im</dt><dd><button id="centre-imag" class="coordinate-value" type="button" aria-label="Imaginary part of the center: show all digits or edit" aria-haspopup="dialog" aria-controls="view-dialog" title="Show all digits or edit"></button></dd></div>
+        <div><dt>Zoom</dt><dd class="zoom-value"><button id="zoom-level" class="coordinate-value" type="button" aria-label="Zoom, relative to the full view: show or edit" aria-haspopup="dialog" aria-controls="view-dialog" title="Magnification relative to the full view. Click to edit"></button></dd></div>
       </dl>
       <button id="copy-view" class="copy-view" type="button" title="Copy position and zoom" aria-label="Copy position and zoom">
         <svg width="14" height="14" class="copy-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" /></svg>
@@ -52,30 +52,55 @@
       </button>
       <span id="copy-feedback" class="copy-feedback" role="status" aria-live="polite" aria-atomic="true"></span>
     </section>
-    <button id="reset-view" class="reset-view" type="button" title="Back to the full view (Home)" hidden>
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6a5 5 0 1 1-.1 4M3 2.5V6h3.5" /></svg>
-      Reset
-    </button>
+    <div id="view-controls" class="view-controls">
+      <button id="reset-view" class="reset-view" type="button" title="Back to the full view (Home)" hidden>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6a5 5 0 1 1-.1 4M3 2.5V6h3.5" /></svg>
+        Reset
+      </button>
+      <!-- Hold to keep zooming about the center. -->
+      <button id="zoom-in" class="zoom-button" type="button" aria-label="Zoom in" title="Zoom in (hold to keep zooming)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+      </button>
+      <button id="zoom-out" class="zoom-button" type="button" aria-label="Zoom out" title="Zoom out (hold to keep zooming)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10" /></svg>
+      </button>
     </div>
-    <dialog id="coordinate-dialog" class="coordinate-dialog" aria-labelledby="coordinate-title" aria-describedby="coordinate-hint">
-      <div class="coordinate-dialog-header">
-        <h2 id="coordinate-title">Center</h2>
-        <button id="close-coordinate" class="dialog-close" type="button" aria-label="Close" title="Close (Esc)" autofocus>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
-        </button>
-      </div>
-      <p id="coordinate-hint">All the digits this zoom level needs.</p>
-      <div class="coordinate-dialog-body">
-        <p id="coordinate-full" tabindex="0"></p>
-      </div>
-      <div class="coordinate-actions">
-        <button id="copy-coordinate" class="dialog-copy" type="button" aria-label="Copy this coordinate">
-          <svg width="14" height="14" class="copy-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" /></svg>
-          <svg width="14" height="14" class="copy-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8 3.5 3.5L13 5" /></svg>
-          Copy
-        </button>
-        <span id="coordinate-copy-feedback" class="coordinate-copy-feedback" role="status" aria-live="polite" aria-atomic="true"></span>
-      </div>
+    </div>
+    <dialog id="view-dialog" class="view-dialog" aria-labelledby="view-dialog-title" aria-describedby="view-dialog-hint">
+      <form id="view-form" novalidate>
+        <div class="view-dialog-header">
+          <h2 id="view-dialog-title">View</h2>
+          <button id="close-view-dialog" class="dialog-close" type="button" aria-label="Close" title="Close (Esc)" autofocus>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+        </div>
+        <p id="view-dialog-hint" class="view-dialog-hint">All the digits this zoom level needs. Edit any value, then apply to go there.</p>
+        <div class="view-field">
+          <label for="view-re">Center · real part (Re)</label>
+          <textarea id="view-re" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-re-error"></textarea>
+          <p id="view-re-error" class="field-error"></p>
+        </div>
+        <div class="view-field">
+          <label for="view-im">Center · imaginary part (Im)</label>
+          <textarea id="view-im" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-im-error"></textarea>
+          <p id="view-im-error" class="field-error"></p>
+        </div>
+        <div class="view-field">
+          <label for="view-zoom">Zoom</label>
+          <input id="view-zoom" class="view-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-zoom-hint view-zoom-error" />
+          <p id="view-zoom-hint" class="field-hint">Times the full view, such as 250 or 2.5e12.</p>
+          <p id="view-zoom-error" class="field-error"></p>
+        </div>
+        <div class="view-dialog-actions">
+          <button id="copy-view-values" class="dialog-copy" type="button" aria-label="Copy position and zoom" title="Copy the current position and zoom">
+            <svg width="14" height="14" class="copy-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" /></svg>
+            <svg width="14" height="14" class="copy-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8 3.5 3.5L13 5" /></svg>
+            Copy
+          </button>
+          <span id="view-copy-feedback" class="view-copy-feedback" role="status" aria-live="polite" aria-atomic="true"></span>
+          <button id="apply-view" class="dialog-apply" type="submit">Apply</button>
+        </div>
+      </form>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
