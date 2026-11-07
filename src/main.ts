@@ -440,6 +440,8 @@ canvas.addEventListener('lostpointercapture', releasePointer);
 window.addEventListener('blur', () => { pointers.clear(); canvas.classList.remove('dragging'); });
 
 function resetView(): void {
+  // A step or glide still under way would carry on from the new view.
+  hud.stopZooming();
   pointers.clear();
   canvas.classList.remove('dragging');
   view = initialView(cssWidth, cssHeight);
@@ -450,6 +452,7 @@ function resetView(): void {
 
 /** Jump to an unrelated view (a link, the view dialog): what was learnt about the budget no longer applies. */
 function goTo(next: View): void {
+  hud.stopZooming();
   pointers.clear();
   canvas.classList.remove('dragging');
   view = next;
@@ -463,13 +466,6 @@ window.addEventListener('hashchange', () => {
   if (location.hash.length <= 1) { resetView(); return; }
   const next = parseViewHash(location.hash, initialView(cssWidth, cssHeight).logScale);
   if (next) goTo(next);
-});
-
-window.addEventListener('keydown', event => {
-  if (hud.dialogOpen) return;
-  if (event.key !== 'Home') return;
-  event.preventDefault();
-  resetView();
 });
 
 function resize(): void {

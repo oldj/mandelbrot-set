@@ -521,6 +521,87 @@ test('zoom buttons animate about the centre: a step per tap, steady while held, 
   assert.equal(h.elements.get('#view-controls').emit('wheel').stopped, true);
 });
 
+test('+ and - zoom about the centre while held, like the buttons; 0 and Home reset', () => {
+  const h = harness();
+  h.flush();
+  const start = h.request().view;
+  const zoomed = () => { h.flush(); return start.logScale - h.request().view.logScale; };
+  let time = 1000;
+  const frames = (ms, step = 16) => { for (const end = time + ms; time < end;) h.flushFrames(time += step); };
+  const key = (type, key, code, extra = {}) => h.window.emit(type, { key, code, ...extra });
+
+  // A tap of = (the + key unshifted) is one step in, eased like a button tap.
+  key('keydown', '=', 'Equal');
+  assert.equal(zoomed(), 0, 'no jump on press');
+  key('keyup', '=', 'Equal');
+  frames(1000);
+  near(zoomed(), STEP);
+  const shift = BigInt(h.request().view.bits - start.bits);
+  assert.equal(h.request().view.re, start.re << shift, 'the centre stays put');
+
+  // Held, + zooms steadily: repeats add nothing; the zoom-in button shows it pressed.
+  // Shift let go before the key still ends the hold: the release is matched by key position.
+  let before = zoomed();
+  key('keydown', '+', 'Equal', { shiftKey: true });
+  assert.ok(h.elements.get('#zoom-in').classes.has('holding'));
+  frames(16);
+  for (let i = 0; i < 50; i++) { key('keydown', '+', 'Equal', { shiftKey: true, repeat: true }); frames(20, 20); }
+  const held = zoomed() - before;
+  assert.ok(held > HOLD_RATE * 0.9 && held < STEP + HOLD_RATE * 1.1, `held about a second: ${held}`);
+  key('keyup', '=', 'Equal');
+  assert.ok(!h.elements.get('#zoom-in').classes.has('holding'));
+  frames(1000);
+  const settled = zoomed();
+  frames(1000);
+  assert.equal(zoomed(), settled, 'stops once released');
+
+  // - zooms out, numpad keys too.
+  before = zoomed();
+  key('keydown', '-', 'Minus'); key('keyup', '-', 'Minus');
+  key('keydown', '-', 'NumpadSubtract'); key('keyup', '-', 'NumpadSubtract');
+  frames(1000);
+  near(zoomed() - before, -2 * STEP);
+  before = zoomed();
+  key('keydown', '+', 'NumpadAdd'); key('keyup', '+', 'NumpadAdd');
+  frames(1000);
+  near(zoomed() - before, STEP);
+
+  // Browser zoom (Ctrl/⌘ +) and keys typed into the dialog are left alone.
+  before = zoomed();
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey']) {
+    key('keydown', '+', 'Equal', { [modifier]: true });
+    key('keyup', '=', 'Equal');
+  }
+  h.elements.get('#centre-real').emit('click');
+  key('keydown', '-', 'Minus'); key('keyup', '-', 'Minus');
+  key('keydown', '0', 'Digit0');
+  h.elements.get('#close-view-dialog').emit('click');
+  frames(1000);
+  assert.equal(zoomed(), before);
+
+  // 0 resets, and a step still easing out doesn't carry on from the reset view.
+  key('keydown', '=', 'Equal'); key('keyup', '=', 'Equal');
+  frames(16); frames(16);
+  key('keydown', '0', 'Digit0');
+  frames(1000);
+  assert.equal(h.request().view.logScale, start.logScale);
+  assert.equal(h.location.hash, '');
+  // Held 0 resets once, not on every repeat.
+  const id = h.request().id;
+  key('keydown', '0', 'Digit0', { repeat: true });
+  h.flush();
+  assert.equal(h.request().id, id);
+
+  // Leaving the window mid-hold lets go, as the key-up will never arrive.
+  key('keydown', '+', 'Equal');
+  frames(200);
+  h.window.emit('blur');
+  frames(1000);
+  const afterBlur = zoomed();
+  frames(1000);
+  assert.equal(zoomed(), afterBlur);
+});
+
 test('coordinate labels adapt to available width without changing the view', () => {
   const h = harness(); h.flushFrames();
   const real = h.elements.get('#centre-real');

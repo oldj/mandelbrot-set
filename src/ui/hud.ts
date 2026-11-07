@@ -2,7 +2,8 @@
  * The information panel and its controls: the centre coordinates (abbreviated
  * to fit their boxes) and the magnification, which open the view dialog (all
  * digits, copy, edit and apply); copying the view to the clipboard; the reset
- * button, only shown away from the initial view; and the zoom buttons.
+ * button, only shown away from the initial view; the zoom buttons; and the
+ * keyboard shortcuts (+ and - zoom, 0 and Home reset).
  * main.ts owns the view; the panel reads it through `current`, is refreshed
  * from each drawn frame, and asks for changes through the callbacks.
  */
@@ -33,8 +34,8 @@ export interface HudOptions {
 export interface Hud {
   /** Refresh the panel for the view about to be drawn (cheap when nothing changed). */
   update(view: View, cssWidth: number, cssHeight: number): void;
-  /** Whether the view dialog is open (keyboard shortcuts stay off then). */
-  readonly dialogOpen: boolean;
+  /** End any zoom the buttons or keys are animating, e.g. before jumping to another view. */
+  stopZooming(): void;
   dispose(): void;
 }
 
@@ -210,16 +211,54 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   });
 
   resetButton.addEventListener('click', onReset);
-  const stopZoomIn = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-in')!, -1, onZoom);
-  const stopZoomOut = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-out')!, 1, onZoom);
+  const zoomIn = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-in')!, -1, onZoom);
+  const zoomOut = holdToZoom(document.querySelector<HTMLButtonElement>('#zoom-out')!, 1, onZoom);
+
+  // Keyboard shortcuts: + (or =, its unshifted key) and - press the zoom
+  // buttons for as long as they are held; 0 and Home reset the view.
+  /** Each held shortcut by physical key, so releasing Shift before = still ends the + hold. */
+  const heldKeys = new Map<string, ReturnType<typeof holdToZoom>>();
+  const shortcutZoom = (key: string) => key === '+' || key === '=' ? zoomIn : key === '-' || key === '_' ? zoomOut : undefined;
+  const onKeyDown = (event: KeyboardEvent) => {
+    // Browser zoom (Ctrl/⌘ with + or -) and other shortcuts are left alone, as is typing.
+    if (viewDialog.open || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? '')) return;
+    const control = shortcutZoom(event.key);
+    if (control) {
+      event.preventDefault();
+      const code = event.code || event.key;
+      // Repeats while held change nothing; a hold the page missed the start of (a key pressed elsewhere) starts here.
+      if (heldKeys.has(code)) return;
+      heldKeys.set(code, control);
+      control.press(`key:${code}`);
+    } else if (event.key === '0' || event.key === 'Home') {
+      event.preventDefault();
+      if (!event.repeat) onReset();
+    }
+  };
+  const onKeyUp = (event: KeyboardEvent) => {
+    const code = event.code || event.key;
+    heldKeys.get(code)?.release(`key:${code}`);
+    heldKeys.delete(code);
+  };
+  // The buttons let go of every hold on blur; forget which keys held them too.
+  const onBlur = () => heldKeys.clear();
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', onBlur);
+  function stopZooming(): void {
+    zoomIn.stop(); zoomOut.stop();
+    heldKeys.clear();
+  }
   // Interacting with the information controls must not zoom the fractal underneath.
   infoPanel.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
   controls.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
 
   return {
     update,
-    get dialogOpen() { return viewDialog.open; },
-    dispose() { stopCopyView(); stopCopyValues(); stopZoomIn(); stopZoomOut(); },
+    stopZooming,
+    dispose() { stopCopyView(); stopCopyValues(); stopZooming(); },
   };
 }
 

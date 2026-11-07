@@ -53,15 +53,15 @@
       <span id="copy-feedback" class="copy-feedback" role="status" aria-live="polite" aria-atomic="true"></span>
     </section>
     <div id="view-controls" class="view-controls">
-      <button id="reset-view" class="reset-view" type="button" title="Back to the full view (Home)" hidden>
+      <button id="reset-view" class="reset-view" type="button" title="Back to the full view (0 or Home)" aria-keyshortcuts="0 Home" hidden>
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6a5 5 0 1 1-.1 4M3 2.5V6h3.5" /></svg>
         Reset
       </button>
       <!-- Hold to keep zooming about the center. Smaller on the left, larger on the right, as on a number line. -->
-      <button id="zoom-out" class="zoom-button" type="button" aria-label="Zoom out" title="Zoom out (hold to keep zooming)">
+      <button id="zoom-out" class="zoom-button" type="button" aria-label="Zoom out" aria-keyshortcuts="-" title="Zoom out (−, hold to keep zooming)">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10" /></svg>
       </button>
-      <button id="zoom-in" class="zoom-button" type="button" aria-label="Zoom in" title="Zoom in (hold to keep zooming)">
+      <button id="zoom-in" class="zoom-button" type="button" aria-label="Zoom in" aria-keyshortcuts="+ =" title="Zoom in (+, hold to keep zooming)">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
       </button>
     </div>

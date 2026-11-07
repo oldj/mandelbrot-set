@@ -12,6 +12,8 @@
  *
  * Enter or Space held on the focused button act like a held pointer; a click
  * with no key or pointer behind it (assistive technology) zooms one step.
+ * Other inputs (keyboard shortcuts) press and release it through the returned
+ * control. Each input holds it separately; it zooms while any of them does.
  */
 
 /** log2 of the zoom for one press: a factor of √2. */
@@ -31,15 +33,24 @@ const SETTLED = 1e-3;
 
 const isActivationKey = (key: string) => key === 'Enter' || key === ' ';
 
+export interface ZoomControl {
+  /** Start holding on behalf of `source` (one step, then steady zooming); ignored while `source` already holds. */
+  press(source: string): void;
+  /** Stop holding on behalf of `source`; the zoom glides to a stop once nothing holds it. */
+  release(source: string): void;
+  /** Stop at once, without finishing the step or the glide. */
+  stop(): void;
+}
+
 /**
  * Wire `button` to call `zoom(direction * amount)` once per animation frame
  * while it moves: direction -1 zooms in (the scale shrinks), +1 out.
- * Returns a function that stops it at once.
  */
-export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (logFactor: number) => void): () => void {
+export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (logFactor: number) => void): ZoomControl {
   /** log2 still to zoom: from presses, and the glide after a hold. */
   let owed = 0;
-  let held: 'pointer' | 'key' | undefined;
+  /** What holds it down: 'pointer', 'key' (Enter or Space on the button), or a caller's source. */
+  const held = new Set<string>();
   let pointer: number | undefined;
   /** Whether the last frame zoomed at the held rate rather than easing out a step. */
   let steady = false;
@@ -54,29 +65,31 @@ export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (
     if (last !== undefined) {
       const dt = Math.min(time - last, MAX_FRAME_MS);
       let amount = owed * (1 - Math.exp(-dt / EASE_MS));
-      steady = held !== undefined && HOLD_RATE * dt / 1000 >= amount;
+      steady = held.size > 0 && HOLD_RATE * dt / 1000 >= amount;
       if (steady) amount = HOLD_RATE * dt / 1000;
-      if (!held && owed - amount < SETTLED) amount = owed;
+      if (!held.size && owed - amount < SETTLED) amount = owed;
       owed = Math.max(0, owed - amount);
       if (amount > 0) zoom(direction * amount);
     }
     last = time;
-    if (held || owed > 0) frame = requestAnimationFrame(tick);
+    if (held.size || owed > 0) frame = requestAnimationFrame(tick);
     else last = undefined;
   }
   function run(): void {
     if (!frame) frame = requestAnimationFrame(tick);
   }
 
-  function press(by: 'pointer' | 'key'): void {
-    held = by;
+  function press(source: string): void {
+    if (held.has(source)) return;
+    held.add(source);
     owed += STEP;
     button.classList.add('holding');
     run();
   }
-  function release(): void {
-    if (!held) return;
-    held = undefined; pointer = undefined;
+  function release(source: string): void {
+    if (!held.delete(source)) return;
+    if (source === 'pointer') pointer = undefined;
+    if (held.size) return;
     button.classList.remove('holding');
     // Coming off steady zooming, owe what decelerating from HOLD_RATE with
     // the ease-out covers, so its speed starts where the hold's left off. At
@@ -86,14 +99,17 @@ export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (
     steady = false;
     run();
   }
+  function releaseAll(): void {
+    for (const source of [...held]) release(source);
+  }
   function stop(): void {
     cancelAnimationFrame(frame);
-    frame = 0; last = undefined; owed = 0; held = undefined; pointer = undefined; steady = false;
+    frame = 0; last = undefined; owed = 0; held.clear(); pointer = undefined; steady = false;
     button.classList.remove('holding');
   }
 
   button.addEventListener('pointerdown', event => {
-    if (held || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    if (held.has('pointer') || (event.pointerType === 'mouse' && event.button !== 0)) return;
     // No focus ring, text selection or (on touch) long-press menu for a held button.
     event.preventDefault();
     // Capture so a finger sliding off the button still ends the hold on release.
@@ -101,7 +117,7 @@ export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (
     pointer = event.pointerId;
     press('pointer');
   });
-  const releasePointer = (event: PointerEvent) => { if (held === 'pointer' && event.pointerId === pointer) release(); };
+  const releasePointer = (event: PointerEvent) => { if (held.has('pointer') && event.pointerId === pointer) release('pointer'); };
   button.addEventListener('pointerup', releasePointer);
   button.addEventListener('pointercancel', releasePointer);
   button.addEventListener('lostpointercapture', releasePointer);
@@ -111,10 +127,10 @@ export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (
     if (!isActivationKey(event.key)) return;
     // Enter clicks on every keydown, repeats included; Space clicks on keyup.
     keyClick = true;
-    if (!event.repeat && !held) press('key');
+    if (!event.repeat) press('key');
   });
-  button.addEventListener('keyup', event => { if (isActivationKey(event.key) && held === 'key') release(); });
-  button.addEventListener('blur', () => { if (held === 'key') release(); });
+  button.addEventListener('keyup', event => { if (isActivationKey(event.key)) release('key'); });
+  button.addEventListener('blur', () => release('key'));
   // Pointer presses already zoomed (their clicks have detail ≥ 1), and so did keys.
   button.addEventListener('click', event => {
     if (event.detail !== 0) return;
@@ -122,6 +138,7 @@ export function holdToZoom(button: HTMLButtonElement, direction: -1 | 1, zoom: (
     owed += STEP;
     run();
   });
-  window.addEventListener('blur', release);
-  return stop;
+  // Keys and pointers released in another window never report it here.
+  window.addEventListener('blur', releaseAll);
+  return { press, release, stop };
 }
