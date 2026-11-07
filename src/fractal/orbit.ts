@@ -60,6 +60,8 @@ export interface Reference {
   glitch: Float64Array;
   /** Extended-exponent orbit and BLA tables, only built for views that need them (below 2^-900). */
   orbit?: Extended[];
+  /** log2 |Z_m| for the extended orbit: the kernel compares against it every step. */
+  orbitLog?: Float64Array;
   levels?: (BLA | undefined)[][];
 }
 
@@ -140,8 +142,9 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
   if (native.length > 1) for (let j = 0; j * NATIVE_FIELDS < native[1].length; j++) skipRadiusSquared[1 + 2 * j] = native[1][j * NATIVE_FIELDS + 4];
   const glitch = new Float64Array(length);
   for (let i = 0; i < length; i++) glitch[i] = (real[i] * real[i] + imag[i] * imag[i]) * 1e-14;
+  const orbit = extended ? Array.from({ length }, (_, i) => point(i)) : undefined;
   return { real, imag, native, firstRadiusSquared, skipRadiusSquared, glitch,
-    orbit: extended ? Array.from({ length }, (_, i) => point(i)) : undefined, levels };
+    orbit, orbitLog: orbit && Float64Array.from(orbit, logMagnitude), levels };
 }
 
 /** Orbit and tables for a view in one go (when no shared orbit is supplied). */

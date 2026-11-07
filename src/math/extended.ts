@@ -12,6 +12,9 @@ export const ONE: Extended = { re: 1, im: 0, exp: 0 };
 export function extended(re: number, im = 0, exp = 0): Extended {
   const magnitude = Math.max(Math.abs(re), Math.abs(im));
   if (magnitude === 0) return ZERO;
+  // Already normalized (common after adding values of similar size): the general path would scale by
+  // exactly 1. It returns exp + 0, which turns a -0 exponent into +0; so does this.
+  if (magnitude >= 1 && magnitude < 2) return { re, im, exp: exp + 0 };
   const shift = Math.floor(Math.log2(magnitude));
   // Split scaling to handle subnormal doubles too: 2^-shift alone overflows
   // to Infinity once shift < -1023, so never form a factor above 2^1023.

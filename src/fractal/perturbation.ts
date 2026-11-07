@@ -215,9 +215,10 @@ const negate = (a: Extended): Extended => ({ re: -a.re, im: -a.im, exp: a.exp })
  * perturbNative; radii are tracked as log2 so they cannot underflow.
  */
 export function perturbExtended(reference: Reference, dc: Extended, limit: number, fallback: () => number, stats: SampleStats, logPixel: number): number {
-  const orbit = reference.orbit!;
+  const orbit = reference.orbit!, orbitLog = reference.orbitLog!;
   const logDc = logMagnitude(dc);
-  let delta = ZERO, m = 0, n = 0;
+  // logDelta is always logMagnitude(delta), kept alongside it rather than recomputed at each use.
+  let delta = ZERO, logDelta = -Infinity, m = 0, n = 0;
   // z' (dz/dc times the pixel size) as (er, ei) 2^eExp, with lift = pixel / 2^eExp; zr, zi hold z itself (|z| <= 16).
   const pixelExponent = Math.floor(logPixel), pixel = extended(2 ** (logPixel - pixelExponent), 0, pixelExponent);
   let er = 0, ei = 0, eExp = pixel.exp, lift = pixel.re, zr = 0, zi = 0;
@@ -226,7 +227,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
   const logRadii = [-Infinity, -Infinity, -Infinity, -Infinity];
   while (n < limit) {
     steps++;
-    const block = verify ? undefined : lookupExtended(reference, m, logMagnitude(delta), limit - n);
+    const block = verify ? undefined : lookupExtended(reference, m, logDelta, limit - n);
     const skipped = block !== undefined;
     if (block) {
       const derivative = linear(block.a, { re: er, im: ei, exp: eExp }, block.b, pixel);
@@ -235,7 +236,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       m += block.length; n += block.length; stats.skipped += block.length - 1;
     } else {
       if (verify) {
-        const logZ = logMagnitude(add(orbit[m], delta)), logReference = logMagnitude(orbit[m]), logDelta = logMagnitude(delta);
+        const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];
         const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
         for (let i = 0; i < 4; i++) logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
       }
@@ -245,7 +246,8 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       delta = perturbStep(orbit[m], delta, dc);
       m++; n++;
     }
-    const z = orbit[m];
+    logDelta = logMagnitude(delta);
+    const z = orbit[m], logReference = orbitLog[m];
     const total = add(z, delta);
     const logTotal = logMagnitude(total);
     if (logTotal > 4) {
@@ -254,10 +256,10 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
     }
     const unit = 2 ** total.exp;
     zr = total.re * unit; zi = total.im * unit;
-    if (logTotal < logMagnitude(z) - 24 || Number.isNaN(logTotal)) return fallback();
-    const rebase = logTotal < logMagnitude(delta) || m === orbit.length - 1;
+    if (logTotal < logReference - 24 || Number.isNaN(logTotal)) return fallback();
+    const rebase = logTotal < logDelta || m === orbit.length - 1;
     if (verify) {
-      const error = LOG_ROUNDING + logAdd(logMagnitude(z), logMagnitude(delta));
+      const error = LOG_ROUNDING + logAdd(logReference, logDelta);
       if (--verify === 0) {
         const distance = logAdd(logMagnitude(add(total, negate(start))), logAdd(startError, error));
         if (logRadii.some((logRadius, i) => logAdd(distance, logRadius) <= logRadius0 + 8 * i)) return INTERIOR;
@@ -274,7 +276,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
       const logDistance = near ? logMagnitude(add(total, negate(base))) : Infinity;
       if (eligible && (logDistance < baseLog - 10 || (collapse && collapsedBase))) {
         verify = period; spent += period; start = total;
-        startError = LOG_ROUNDING + logAdd(logMagnitude(z), logMagnitude(delta));
+        startError = LOG_ROUNDING + logAdd(logReference, logDelta);
         logRadius0 = 3 + logAdd(logDistance, startError);
         for (let i = 0; i < 4; i++) logRadii[i] = logRadius0 + 8 * i;
       } else if (logTotal < baseLog || n >= reset) {
@@ -283,7 +285,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
         base = total; baseLog = logTotal; baseN = n;
       }
     } else { base = total; baseLog = logTotal; baseN = n; }
-    if (rebase) { delta = total; m = 0; }
+    if (rebase) { delta = total; logDelta = logTotal; m = 0; }
   }
   stats.unresolved++;
   lastSample.unresolved = true;
