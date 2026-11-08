@@ -36,7 +36,7 @@ export interface ReferenceCache { entry?: ReferenceEntry }
 export type ReferenceSource = () => Promise<ReferenceEntry>;
 
 /**
- * A sampler for a view: plain doubles above 2^-38, otherwise perturbation
+ * A sampler for a view: plain doubles above 2^-24, otherwise perturbation
  * around a reference (the cached or supplied one when it still covers the
  * view, see referenceOffset, else a new one), native down to 2^-900 and
  * extended-exponent below. Deep native samples first try the neighbouring

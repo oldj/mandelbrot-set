@@ -9,8 +9,17 @@ import type { Extended } from '../math/extended.ts';
 import { fixedToNumber } from '../math/precision.ts';
 import type { View } from '../math/precision.ts';
 
-/** Views at or below this scale use a perturbation reference instead of plain doubles. */
-export const DEEP_LOG_SCALE = -38;
+/**
+ * Views at or below this scale use a perturbation reference instead of plain
+ * doubles. Plain doubles round z itself, at |z| ~ 1; perturbation rounds δ,
+ * far smaller. Against BigInt for every pixel of filament-rich views, plain
+ * doubles left 3-5x as many samples off by more than half an iteration as
+ * perturbation at 2^-22, 7-10x at 2^-26, 10-30x at 2^-30 (up to 5.6% of the
+ * view), and from 2^-34 some came out inside instead of escaping; at 2^-14
+ * the two were alike. Perturbation from 2^-24 makes renders between here and
+ * 2^-38 1.3-2.2x slower than plain doubles were.
+ */
+export const DEEP_LOG_SCALE = -24;
 /** A reused reference may be at most 2^24 CSS pixels from the view centre. */
 const MAX_REFERENCE_OFFSET_BITS = 24;
 

@@ -3,6 +3,7 @@
  * most 8), fewer for small regions, and fewer when long reference orbits would
  * multiply memory across workers.
  */
+import { DEEP_LOG_SCALE } from '../fractal/reference.ts';
 /** Leave a logical core available for input, compositing and the rest of the page. */
 export function workerCapacity(hardwareConcurrency: number | undefined): number {
   const cores = hardwareConcurrency && Number.isFinite(hardwareConcurrency) ? Math.floor(hardwareConcurrency) : 4;
@@ -21,7 +22,7 @@ export function referenceBytesPerIteration(logScale: number): number {
 }
 
 export function renderWorkerCount(capacity: number, pixels: number, logScale: number, iterations: number): number {
-  const deep = logScale <= -38;
+  const deep = logScale <= DEEP_LOG_SCALE;
   const workload = Math.ceil(pixels / (deep ? 8192 : 65536));
   // Each deep worker owns a copy of the reference tables. This is a conservative
   // planning estimate (not a hard memory bound), so very long references don't

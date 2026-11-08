@@ -416,3 +416,19 @@ test('BLA blocks do not drift on orbits that linger near repelling cycles', asyn
   }
   assert.ok(wrong <= 8, `${wrong} of 4280 samples wrong against BigInt`);
 });
+
+test('views from 2^-24 down use perturbation, which keeps escape counts near BigInt where plain doubles drift', async () => {
+  // Plain doubles round z itself (|z| ~ 1), perturbation only δ. In this filament-rich view at 2^-30,
+  // 98 of these 1800 samples came out wrong against BigInt (inside instead of escaping, or off by more
+  // than half an iteration) with plain doubles, 13 with perturbation.
+  const base = ensurePrecision({ re: 0n, im: 0n, bits: 64, logScale: -30 });
+  const view = { ...base, re: toFixed(-0.6775690432191032, base.bits), im: toFixed(0.4316456926549795, base.bits) };
+  const W = 240, H = 150, limit = 8192, sampler = await createSampler(view, W, H, limit, noop);
+  assert.equal(sampler.row, undefined, 'perturbation, not plain double rows');
+  let wrong = 0;
+  for (let y = 0; y < H; y += 5) for (let x = 0; x < W; x += 4) {
+    const sx = x + 0.5 - W / 2, sy = y + 0.5 - H / 2, value = sampler.sample(sx, sy), exact = oracle(view, sx, sy, limit);
+    if ((value < 0) !== (exact < 0) || (exact >= 0 && Math.abs(value - exact) > 0.5)) wrong++;
+  }
+  assert.ok(wrong <= 30, `${wrong} of 1800 samples wrong against BigInt`);
+});
