@@ -355,18 +355,19 @@ async function samplePixels(request: PixelRequest): Promise<void> {
     lastYield = performance.now();
     if (generation !== request.id) throw CANCELLED;
   };
-  const { id, view, width, height, cssWidth, cssHeight, iterations, reference, pixels } = request;
+  const { id, round, view, width, height, cssWidth, cssHeight, iterations, reference, pixels, orbitOnly } = request;
   const source = reference && (() => sharedReference(reference));
   // Worker 0 builds the shared orbit even without pixels of its own: the others wait for it.
   const sampler = pixels.length || reference?.build
     ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
+  if (orbitOnly) return;
   const physical = width / cssWidth, toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
   let start = 0, lastFlush = performance.now(), unresolved = 0;
   const counts = new Float32Array(pixels.length), distances = new Uint8Array(pixels.length), flags = new Uint8Array(pixels.length);
   const flush = (end: number, done?: PixelSamples['done']) => {
     const indices = pixels.slice(start, end), batchCounts = counts.slice(start, end), batchDistances = distances.slice(start, end);
     const batchFlags = flags.slice(start, end);
-    send({ type: 'samples', id, indices, counts: batchCounts, distances: batchDistances, unresolved: batchFlags, done },
+    send({ type: 'samples', id, round, indices, counts: batchCounts, distances: batchDistances, unresolved: batchFlags, done },
       [indices.buffer, batchCounts.buffer, batchDistances.buffer, batchFlags.buffer]);
     start = end; lastFlush = performance.now();
   };

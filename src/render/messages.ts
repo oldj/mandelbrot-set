@@ -45,6 +45,13 @@ export interface PixelRequest {
   iterations: number;
   reference?: ReferencePlan;
   pixels: Uint32Array<ArrayBuffer>;
+  /** Echoed in the samples, so a render tells its rounds of requests apart. */
+  round: number;
+  /**
+   * Only build the shared orbit (and its tables), for the GPU: no pixels, and
+   * no samples message, which a round under way could take for one of its own.
+   */
+  orbitOnly?: boolean;
 }
 
 export type RenderCommand = RenderRequest | PixelRequest | ReferenceDelivery | PaletteSwitch | { type: 'cancel'; id: number };
@@ -129,6 +136,8 @@ export interface ReferenceBuilt { type: 'reference'; key: number; orbit: OrbitDa
 export interface PixelSamples {
   type: 'samples';
   id: number;
+  /** The request's round. */
+  round: number;
   indices: Uint32Array<ArrayBuffer>;
   /** Smooth escape counts (INTERIOR for interior) and outline distance levels (see samples.ts). */
   counts: Float32Array<ArrayBuffer>;

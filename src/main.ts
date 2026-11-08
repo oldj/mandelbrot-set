@@ -156,7 +156,8 @@ if (gpuStarting) {
     gpu = renderer;
     if (view) startRender();
   };
-  void GpuRenderer.create().then(ready);
+  // Ready after the wait: used from the next render on.
+  void GpuRenderer.create().then(renderer => { if (gpuStarting) ready(renderer); else gpu ??= renderer; });
   setTimeout(() => ready(), 2000);
 }
 /** The current GPU render's handler for the workers' samples, and how to release it when a newer render starts. */
@@ -166,6 +167,18 @@ let gpuFixRelease: (() => void) | undefined;
 let orbitWaiters: { key: number; resolve: () => void }[] = [];
 /** A pixel the workers proved interior (final, black). */
 const PROVEN = -5;
+/** Rounds of pixel requests so far: a round counts only its own workers' reports. */
+let gpuRounds = 0;
+/** Set when the GPU failed: the next render covers the view again on the workers, even if nothing moved. */
+let renderAgain = false;
+
+/** The GPU failed during the current render: stop using it, and finish the view on the workers. */
+function gpuFailed(reason: unknown): void {
+  console.warn('GPU rendering failed; rendering on the workers from now on:', reason);
+  gpu = undefined;
+  renderAgain = true;
+  startRender();
+}
 
 const usesGpu = (target: View) => !!gpu?.usable && GpuRenderer.serves(target);
 
@@ -192,7 +205,7 @@ async function gpuOrbit(job: GpuJob, id: number, target: Surface, iterations: nu
     // Worker 0 builds it (a request with no pixels of its own); the 'reference' message releases us.
     if (workerOrbitKeys[0] !== shared.key) {
       workers[0].postMessage({ type: 'pixels', id, view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight,
-        iterations, reference: referencePlan(shared, 0), pixels: new Uint32Array(0) } satisfies PixelRequest);
+        iterations, reference: referencePlan(shared, 0), pixels: new Uint32Array(0), round: 0, orbitOnly: true } satisfies PixelRequest);
     }
     await new Promise<void>(resolve => orbitWaiters.push({ key: shared.key, resolve }));
     if (generation !== id || !shared.orbit) return false;
@@ -292,11 +305,11 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // a few thousand get every worker the reference memory allows.
     const shares = Array.from({ length: activeWorkerCount }, (_, w) => new Uint32Array(Math.ceil((list.length - w) / activeWorkerCount)));
     list.forEach((i, k) => { shares[k % activeWorkerCount][Math.floor(k / activeWorkerCount)] = i; });
-    const unresolved: number[] = [];
+    const unresolved: number[] = [], round = ++gpuRounds;
     let reports = 0;
     gpuFixRelease = () => resolve(undefined);
     gpuFix = message => {
-      if (!current() || !stage || !shaders) return;
+      if (message.round !== round || !current() || !stage || !shaders) return;
       const colour = shade(), words = new Uint32Array(message.indices.length);
       samples ??= { counts: new Float32Array(pixels).fill(NaN), distances: new Uint8Array(pixels) };
       for (let k = 0; k < words.length; k++) {
@@ -318,7 +331,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (workerIndex >= activeWorkerCount) return;
       const share = shares[workerIndex];
       worker.postMessage({ type: 'pixels', id, view: target.view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight,
-        iterations, reference: shared && referencePlan(shared, workerIndex), pixels: share } satisfies PixelRequest, [share.buffer]);
+        iterations, reference: shared && referencePlan(shared, workerIndex), pixels: share, round } satisfies PixelRequest, [share.buffer]);
     });
   });
   const leftIn = (list: readonly (readonly [number, number])[]) => {
@@ -328,14 +341,16 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     return all;
   };
   let iterations = target.iterations, runs = 0, cpuPixels = 0;
+  // A pass or orbit that stops while this render is still current means the GPU failed (or the orbit could not serve).
+  const failed = () => { if (current()) gpuFailed('a GPU pass stopped'); };
   try {
-    if (!await gpuOrbit(job, id, target, iterations)) return;
+    if (!await gpuOrbit(job, id, target, iterations)) return failed();
     // 1. Coarse pass (whole renders only: after a pan most of the view is there already). Its unsettled
     // samples are cheap to compute again here, so the budget rises as the workers' coarse pass raises it
     // for cheap ones: whenever adaptBudget calls for it.
     if (!pan) {
       runs++;
-      if (!await run(iterations, 4, tiles, undefined, stageCoarse)) return;
+      if (!await run(iterations, 4, tiles, undefined, stageCoarse)) return failed();
       canvas.dataset.gpuFirstMs = String(Math.round(performance.now() - started));
       coarseReady = true;
       completedStep = 4;
@@ -346,11 +361,11 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
         iterations = adapted.memory!.iterations;
         target.iterations = iterations;
         canvas.dataset.iterations = String(iterations);
-        if (!await gpuOrbit(job, id, target, iterations)) return;
+        if (!await gpuOrbit(job, id, target, iterations)) return failed();
         const mask = new Uint8Array(pixels);
         for (let i = 0; i < pixels; i++) if (isUnsettled(counts[i])) mask[i] = 1;
         runs++;
-        if (!await run(iterations, 4, tiles.filter(tile => within(mask, tile, 4)), mask, stageCoarse)) return;
+        if (!await run(iterations, 4, tiles.filter(tile => within(mask, tile, 4)), mask, stageCoarse)) return failed();
       }
     }
     // 2. Every other pixel (the coarse samples are done, at this budget).
@@ -359,7 +374,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     await yieldToEvents();
     if (!current()) return;
     runs++;
-    if (!await run(iterations, 1, tiles.filter(tile => within(mask, tile, 1)), mask, stageFine)) return;
+    if (!await run(iterations, 1, tiles.filter(tile => within(mask, tile, 1)), mask, stageFine)) return failed();
     canvas.dataset.gpuFirstMs ??= String(Math.round(performance.now() - started));
     coarseReady = true;
     completedStep = 1;
@@ -380,12 +395,12 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       iterations = adapted.memory!.iterations;
       target.iterations = iterations;
       canvas.dataset.iterations = String(iterations);
-      if (!await gpuOrbit(job, id, target, iterations)) return;
+      if (!await gpuOrbit(job, id, target, iterations)) return failed();
       const again = new Uint8Array(pixels);
       for (const i of unresolved) again[i] = 1;
       const rerun = tiles.filter(tile => within(again, tile, 1));
       runs++;
-      if (!await run(iterations, 1, rerun, again, stageFine)) return;
+      if (!await run(iterations, 1, rerun, again, stageFine)) return failed();
       list = leftIn(rerun);
     }
     canvas.dataset.gpuMs = String(Math.round(performance.now() - started));
@@ -511,10 +526,11 @@ function startRender(): void {
     && surface.palette === palette && surface.canvas.width === canvas.width && surface.canvas.height === canvas.height
     ? panRaster(surface.view, view, canvas.width, canvas.height, cssWidth, cssHeight) : undefined;
   // A release or subpixel movement need not cancel useful work already in flight.
-  if (pan && pan.dx === 0 && pan.dy === 0 && canvas.dataset.rendered !== 'error') {
+  if (pan && pan.dx === 0 && pan.dy === 0 && canvas.dataset.rendered !== 'error' && !renderAgain) {
     scheduleDraw();
     return;
   }
+  renderAgain = false;
   // Staged pixels belong to the outgoing surface and are part of the next preview.
   flushTiles();
   const image = document.createElement('canvas');
@@ -584,7 +600,8 @@ function startRender(): void {
     // Only a pan reuses final pixels (quality 1); otherwise none are.
     const reused = new Uint8Array(quality.length);
     if (pan) for (let i = 0; i < quality.length; i++) if (quality[i] === 1) reused[i] = 1;
-    void gpuRender(generation, surface, reused, !!pan).catch(error => console.error('GPU render failed:', error));
+    const id = generation;
+    void gpuRender(id, surface, reused, !!pan).catch(error => { if (generation === id) gpuFailed(error); });
     scheduleDraw();
     return;
   }

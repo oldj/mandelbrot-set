@@ -360,10 +360,11 @@ test('a pixel job samples listed pixels exactly as a render does, and flags thos
     worker.on('error', reject);
     worker.on('message', message => {
       if (message.id !== 2 || message.type !== 'samples') return;
+      assert.equal(message.round, 7, 'samples carry their request\'s round');
       message.indices.forEach((i, k) => got.set(i, [message.counts[k], message.distances[k], message.unresolved[k]]));
       if (message.done) { done = message.done; resolve(); }
     });
-    worker.postMessage({ type: 'pixels', id: 2, view, width, height, cssWidth, cssHeight, iterations, pixels });
+    worker.postMessage({ type: 'pixels', id: 2, view, width, height, cssWidth, cssHeight, iterations, pixels, round: 7 });
   });
   assert.equal(got.size, new Set(pixels).size);
   let flagged = 0;
@@ -375,4 +376,23 @@ test('a pixel job samples listed pixels exactly as a render does, and flags thos
   assert.equal(done.samples, pixels.length);
   assert.equal(done.unresolved, [...pixels].filter(i => got.get(i)[2]).length);
   assert.ok(flagged > 0 && flagged < got.size, `some pixels left unresolved at this budget (${flagged})`);
+});
+
+test('an orbit-only pixel job builds and sends the shared orbit, and no samples a round could miscount', async t => {
+  // GPU renders have worker 0 build the shared orbit with an empty request. Its samples message with
+  // `done` once reached the main thread while a round of real requests was under way, and was counted
+  // as one of their reports: the round ended early and the rest of its samples were dropped.
+  const view = ensurePrecision({ ...initialView(64, 48), logScale: -40 });
+  view.re = toFixed(-0.7436438870371587, view.bits); view.im = toFixed(0.13182590420531197, view.bits);
+  const iterations = 2048, spec = referenceSpec(view, 64, 48, iterations);
+  const worker = startWorker(t), messages = [];
+  worker.on('message', message => messages.push(message));
+  worker.postMessage({ type: 'pixels', id: 3, view, width: 64, height: 48, cssWidth: 64, cssHeight: 48, iterations,
+    reference: { key: 1, spec, build: true }, pixels: new Uint32Array(0), round: 0, orbitOnly: true });
+  const deadline = Date.now() + 60000;
+  while (!messages.some(message => message.type === 'reference') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  // Time for the tables and anything sent after them.
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.ok(messages.some(message => message.type === 'reference' && message.key === 1), 'the orbit is sent');
+  assert.equal(messages.filter(message => message.type === 'samples').length, 0, 'no samples message');
 });

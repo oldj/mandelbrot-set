@@ -37,8 +37,13 @@ interface GPUDevice {
   createBuffer(descriptor: { size: number; usage: number }): GPUBuffer;
   createBindGroup(descriptor: { layout: GPUBindGroupLayout; entries: { binding: number; resource: { buffer: GPUBuffer } }[] }): GPUBindGroup;
   createCommandEncoder(): GPUCommandEncoder;
+  addEventListener(type: 'uncapturederror', listener: (event: Event) => void): void;
 }
-interface GPUAdapter { requestDevice(): Promise<GPUDevice> }
+interface GPUUncapturedErrorEvent extends Event { readonly error: { readonly message: string } }
+interface GPUAdapter {
+  readonly limits: { readonly maxStorageBufferBindingSize: number; readonly maxBufferSize: number };
+  requestDevice(descriptor?: { requiredLimits?: Record<string, number> }): Promise<GPUDevice>;
+}
 interface GPU { requestAdapter(options?: { powerPreference?: 'low-power' | 'high-performance' }): Promise<GPUAdapter | null> }
 interface Navigator { readonly gpu?: GPU }
 declare const GPUBufferUsage: { readonly MAP_READ: number; readonly COPY_SRC: number; readonly COPY_DST: number; readonly UNIFORM: number; readonly STORAGE: number };

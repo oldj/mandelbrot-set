@@ -52,12 +52,14 @@ struct Params {
   scale: vec2f, one: f32, logScale: f32,
   offsetRe: vec2f, offsetIm: vec2f,
   step: u32, side: u32, first: u32, useMask: u32,
+  slotBase: u32, pad0: u32, pad1: u32, pad2: u32,
 }
 @group(0) @binding(0) var<storage, read> orbit: array<vec4f>;
 @group(0) @binding(1) var<storage, read_write> result: array<vec2f>;
 @group(0) @binding(2) var<uniform> p: Params;
 @group(0) @binding(3) var<storage, read> xs: array<vec2f>;
 @group(0) @binding(4) var<storage, read> ys: array<vec2f>;
+// Four pixels a word, a byte each.
 @group(0) @binding(5) var<storage, read> mask: array<u32>;
 @group(0) @binding(6) var<storage, read> tiles: array<vec2u>;
 
@@ -107,7 +109,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let px = origin.x + id.x * p.step;
   let py = origin.y + id.y * p.step;
   if (px >= p.width || py >= p.height) { return; }
-  if (p.useMask != 0u && mask[py * p.width + px] == 0u) { return; }
+  let index = py * p.width + px;
+  if (p.useMask != 0u && ((mask[index >> 2u] >> ((index & 3u) * 8u)) & 255u) == 0u) { return; }
   // dc: the pixel centre in CSS pixels (as the workers sample it) times the CSS pixel size, plus the
   // view centre's offset from the reference.
   let cr = add(p.offsetRe, mul(xs[px], p.scale));
@@ -181,7 +184,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       if (n == checkpoint) { saved = vec2f(zr, zi); savedLog = log2(length(e)) + k; checkpoint *= 2u; dsq = 1.0; dexp = 0.0; }
     }
   }
-  result[tile * p.side * p.side + id.y * p.side + id.x] = vec2f(count, distance);
+  // The batch's slot in the ring of in-flight batches (see GpuJob.pass).
+  result[(p.slotBase + id.z) * p.side * p.side + id.y * p.side + id.x] = vec2f(count, distance);
 }
 `;
 
@@ -226,6 +230,11 @@ export class GpuRenderer {
     this.device = device;
     this.pipeline = pipeline;
     void device.lost.then(() => { this.lost = true; });
+    // A validation or out-of-memory error leaves zeros where results should be: never trust this device again.
+    device.addEventListener('uncapturederror', event => {
+      if (!this.lost) console.warn('GPU error; rendering on the workers from now on:', (event as GPUUncapturedErrorEvent).error.message);
+      this.lost = true;
+    });
   }
 
   /** A renderer on this browser's GPU, or undefined without WebGPU. */
@@ -233,7 +242,9 @@ export class GpuRenderer {
     try {
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) return undefined;
-      const device = await adapter.requestDevice();
+      // Large canvases need more than WebGPU's default 128 MiB bindings (the mask is a byte a pixel).
+      const device = await adapter.requestDevice({ requiredLimits: {
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
       const module = device.createShaderModule({ code: SHADER });
       const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
       return new GpuRenderer(device, pipeline);
@@ -274,9 +285,9 @@ export class GpuJob {
     this.target = target;
     this.lost = lost;
     const { width, height, cssWidth, cssHeight } = target;
-    const tiles = Math.ceil(width / GPU_TILE) * Math.ceil(height / GPU_TILE);
-    this.result = device.createBuffer({ size: tiles * GPU_TILE * GPU_TILE * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    this.mask = device.createBuffer({ size: width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    // Results only for the batches in flight, each in its slot: their size does not grow with the canvas.
+    this.result = device.createBuffer({ size: IN_FLIGHT * MAX_BATCH_TILES * GPU_TILE * GPU_TILE * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    this.mask = device.createBuffer({ size: Math.ceil(width * height / 4) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     // Pixel centres in CSS pixels, as the workers compute them in doubles, kept to double-single.
     const column = new Float32Array(width * 2), row = new Float32Array(height * 2);
     for (let x = 0; x < width; x++) split((x + 0.5) / width * cssWidth - cssWidth / 2, column, 2 * x);
@@ -312,9 +323,10 @@ export class GpuJob {
     const { width, height, view, current } = this.target, device = this.device, orbit = this.orbit!;
     const side = GPU_TILE / step, perTile = side * side;
     if (mask) {
-      const words = new Uint32Array(mask.length);
-      for (let i = 0; i < mask.length; i++) words[i] = mask[i];
-      device.queue.writeBuffer(this.mask, 0, words);
+      // A byte a pixel, padded to whole words.
+      const bytes = new Uint8Array(Math.ceil(mask.length / 4) * 4);
+      bytes.set(mask);
+      device.queue.writeBuffer(this.mask, 0, bytes);
     }
     const origins = new Uint32Array(Math.max(2, tiles.length * 2));
     tiles.forEach(([x, y], i) => { origins[2 * i] = x; origins[2 * i + 1] = y; });
@@ -324,14 +336,16 @@ export class GpuJob {
     split(2 ** view.logScale, scale, 0);
     // Up to IN_FLIGHT batches queued at once, so the GPU never waits for a readback to be processed.
     const inFlight: { first: number; count: number; read: GPUBuffer; uniform: GPUBuffer; mapped: Promise<unknown> }[] = [];
-    let batch = Math.min(this.batchTiles.get(step) ?? 1, MAX_BATCH_TILES), next = 0, stopped = false, lastDone = performance.now(), lastYield = lastDone;
+    let batch = Math.min(this.batchTiles.get(step) ?? 1, MAX_BATCH_TILES), next = 0, submitted = 0, stopped = false, lastDone = performance.now(), lastYield = lastDone;
     const submit = () => {
       const count = Math.min(batch, tiles.length - next), first = next;
       next += count;
-      const params = new ArrayBuffer(64), words = new Uint32Array(params), floats = new Float32Array(params);
+      // Slots go round: a slot is written again only after the batch before it there was read back.
+      const slotBase = (submitted++ % IN_FLIGHT) * MAX_BATCH_TILES;
+      const params = new ArrayBuffer(80), words = new Uint32Array(params), floats = new Float32Array(params);
       words.set([width, height, iterations, orbit.length]);
       floats.set([scale[0], scale[1], 1, view.logScale, orbit.offset[0], orbit.offset[1], orbit.offset[2], orbit.offset[3]], 4);
-      words.set([step, side, first, mask ? 1 : 0], 12);
+      words.set([step, side, first, mask ? 1 : 0, slotBase], 12);
       const uniform = device.createBuffer({ size: params.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const bytes = count * perTile * 8;
       const read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -346,7 +360,7 @@ export class GpuJob {
       computePass.setBindGroup(0, bind);
       computePass.dispatchWorkgroups(Math.ceil(side / 8), Math.ceil(side / 8), count);
       computePass.end();
-      encoder.copyBufferToBuffer(this.result, first * perTile * 8, read, 0, bytes);
+      encoder.copyBufferToBuffer(this.result, slotBase * perTile * 8, read, 0, bytes);
       device.queue.submit([encoder.finish()]);
       // Settled either way: a stale pass still waits for its maps before destroying the buffers.
       inFlight.push({ first, count, read, uniform, mapped: read.mapAsync(GPUMapMode.READ).then(() => true, () => false) });
