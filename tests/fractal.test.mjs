@@ -398,3 +398,21 @@ test('rows prove interiors near a bulb root from attracting cycles, still identi
   assert.ok(unresolved < 150, `proved rather than unresolved (${unresolved} unresolved)`);
   assert.ok(hint.successes > 0, 'neighbouring pixels reuse proved cycles');
 });
+
+test('BLA blocks do not drift on orbits that linger near repelling cycles', async () => {
+  // A seahorse valley at 1.9e12: escaping orbits linger near weakly repelling cycles for thousands of
+  // steps, where every block's error is amplified. With blocks valid while |δ| < 2^-36 |2Z|, 25 of these
+  // 4280 samples were wrong against BigInt (inside instead of escaping, or off by more than half an
+  // iteration); at 2^-40, 3: the same 3 as with no BLA at all, double precision's own floor here.
+  const { parseViewHash } = await import('../src/ui/url-state.ts');
+  const { initialView } = await import('../src/math/precision.ts');
+  const W = 640, H = 257, limit = 2560;
+  const view = parseViewHash('re=-0.7436438870371700355&im=0.1318259042052868754&zoom=1.906544542e12', initialView(W, H).logScale);
+  const sampler = await createSampler(view, W, H, limit, noop);
+  let wrong = 0;
+  for (let y = 60; y < 200; y += 7) for (let x = 0; x < W; x += 3) {
+    const sx = x + 0.5 - W / 2, sy = y + 0.5 - H / 2, value = sampler.sample(sx, sy), exact = oracle(view, sx, sy, limit);
+    if ((value < 0) !== (exact < 0) || (exact >= 0 && Math.abs(value - exact) > 0.5)) wrong++;
+  }
+  assert.ok(wrong <= 8, `${wrong} of 4280 samples wrong against BigInt`);
+});

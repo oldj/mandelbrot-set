@@ -11,12 +11,18 @@ import type { OrbitData } from './reference.ts';
 
 const TWO = extended(2);
 /**
- * BLA drops |δ|² once |δ| < 2^-36 |2Z|. The relative error is equivalent to
- * moving a sample by ~1e-8 pixel; in chaotic boundary regions the exact
- * escape count already varies far more than that within 1e-3 pixel. 2^-42
- * skipped up to 5x fewer iterations at depth with no visible difference.
+ * BLA drops |δ|² once |δ| < 2^-40 |2Z|. Each skipped step then errs by up
+ * to 2^-40 relative, which looks like moving a sample by a tiny fraction of a
+ * pixel; but over long blocks, and along orbits that linger near a repelling
+ * cycle (seahorse valleys), those errors add up and get amplified. Against
+ * BigInt for every pixel: at 2^-36, a seahorse view at 1.9e12 (640x257, 2560
+ * iterations) had 238 samples inside/outside wrong and 1172 off by more than
+ * half an iteration, and a 1e25 view 412 off; at 2^-40 they were 66 and 220
+ * (BLA no longer applies there at all, so that is double precision's own
+ * floor) and 233 (the floor, without BLA, is 149; 2^-44 reaches it). 2^-40
+ * costs up to ~13% more sampling time in deep views, 2^-44 up to ~27%.
  */
-const BLA_EPSILON_BITS = 36;
+const BLA_EPSILON_BITS = 40;
 
 /** One BLA block: δ after `length` steps is a δ + b δc while |δ| < radius (and its log2, logRadius). */
 export interface BLA {
