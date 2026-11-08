@@ -374,7 +374,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     await yieldToEvents();
     if (!current()) return;
     runs++;
-    if (!await run(iterations, 1, tiles.filter(tile => within(mask, tile, 1)), mask, stageFine)) return failed();
+    // Every tile of a whole render is staged here, even one with only coarse samples left (the 1x1 corner
+    // tile when both sides are 64n + 1): staging makes its samples final or leaves them to the workers.
+    // After a pan only the tiles with pixels to compute (there was no coarse pass).
+    if (!await run(iterations, 1, pan ? tiles.filter(tile => within(mask, tile, 1)) : tiles, mask, stageFine)) return failed();
     canvas.dataset.gpuFirstMs ??= String(Math.round(performance.now() - started));
     coarseReady = true;
     completedStep = 1;
@@ -392,8 +395,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (!adapted.raise) break;
       // After a pan the reused pixels keep the old budget: render the whole view at the new one instead.
       if (pan) { startRender(); return; }
+      // The surface keeps the old budget until every pixel is final at the new one (as a workers'
+      // deepening does): the pixels left unresolved are final at quality 1 now, black, so a pan
+      // meanwhile must render the view afresh rather than reuse them.
       iterations = adapted.memory!.iterations;
-      target.iterations = iterations;
       canvas.dataset.iterations = String(iterations);
       if (!await gpuOrbit(job, id, target, iterations)) return failed();
       const again = new Uint8Array(pixels);
@@ -403,6 +408,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (!await run(iterations, 1, rerun, again, stageFine)) return failed();
       list = leftIn(rerun);
     }
+    target.iterations = iterations;
     canvas.dataset.gpuMs = String(Math.round(performance.now() - started));
     canvas.dataset.gpuRuns = String(runs);
     finishRender();
