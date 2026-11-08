@@ -118,3 +118,24 @@ test('a tile\'s samples are spread over exactly the pixels its colours cover', a
     }
   }
 });
+
+test('GPU blocks: final pixels claim everything, provisional ones only what is no finer than 2', () => {
+  // A GPU render stages full-resolution tiles pixel by pixel: final ones at quality 1, those the workers
+  // will still compute at 2 (black for now), none where a pixel is not part of the block (claim 0).
+  const stage = new TileStage(16, 8), quality = new Uint8Array(16 * 8).fill(255);
+  stage.add(tile(0, 0, 2, 2, 4, 4), quality);
+  stage.add(tile(8, 0, 8, 8, 1, 1), quality);
+  const words = new Uint32Array(8 * 4).fill(7), claims = new Uint8Array(8 * 4).fill(1);
+  claims[1 * 8 + 2] = 2; claims[1 * 8 + 1] = 0; claims[0 * 8 + 5] = 2;
+  const painted = stage.addBlock(4, 2, 8, 4, words, claims, quality);
+  assert.equal(word(stage, 4, 2), 7, 'a final pixel replaces a coarse one');
+  assert.equal(quality[2 * 16 + 4], 1);
+  assert.equal(word(stage, 6, 3), 7); assert.equal(quality[3 * 16 + 6], 2, 'provisional pixels stay replaceable');
+  assert.equal(word(stage, 5, 3), 4, 'claim 0 leaves the pixel alone');
+  assert.equal(word(stage, 9, 2), 1, 'a provisional pixel never replaces a final one');
+  assert.equal(word(stage, 10, 2), 7, 'a final one may (the same pixel computed again)');
+  assert.equal(painted.reduce((a, b) => a + b, 0), 8 * 4 - 2);
+  // Single exact pixels from the workers replace provisional ones.
+  stage.addPixels(Uint32Array.of(3 * 16 + 6), Uint32Array.of(9), quality);
+  assert.equal(word(stage, 6, 3), 9); assert.equal(quality[3 * 16 + 6], 1);
+});

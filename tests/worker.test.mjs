@@ -339,3 +339,40 @@ test('deepening resamples only unresolved pixels and ends identical to rendering
     assert.equal(stale.tiles.length, 0);
   }
 });
+
+test('a pixel job samples listed pixels exactly as a render does, and flags those left unresolved', async t => {
+  // GPU renders hand the workers single pixels (main.ts); their samples must be the render's own.
+  const width = 96, height = 64, cssWidth = 96, cssHeight = 64;
+  const view = ensurePrecision({ ...initialView(cssWidth, cssHeight), logScale: initialView(cssWidth, cssHeight).logScale - 3 });
+  view.re = toFixed(-0.75, view.bits); view.im = toFixed(0.1, view.bits);
+  const iterations = 400;
+  const tiles = (await collect(startWorker(t), { id: 1, view, width, height, cssWidth, cssHeight, iterations, workerIndex: 0, workerCount: 1 }))
+    .filter(tile => tile.step === 1);
+  const expected = new Float32Array(width * height), levels = new Uint8Array(width * height);
+  for (const tile of tiles) for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
+    expected[(tile.y + row) * width + tile.x + col] = tile.counts[row * tile.width + col];
+    levels[(tile.y + row) * width + tile.x + col] = tile.distances[row * tile.width + col];
+  }
+  const pixels = Uint32Array.from({ length: 300 }, (_, k) => (k * 7919) % (width * height));
+  const worker = startWorker(t), got = new Map();
+  let done;
+  await new Promise((resolve, reject) => {
+    worker.on('error', reject);
+    worker.on('message', message => {
+      if (message.id !== 2 || message.type !== 'samples') return;
+      message.indices.forEach((i, k) => got.set(i, [message.counts[k], message.distances[k], message.unresolved[k]]));
+      if (message.done) { done = message.done; resolve(); }
+    });
+    worker.postMessage({ type: 'pixels', id: 2, view, width, height, cssWidth, cssHeight, iterations, pixels });
+  });
+  assert.equal(got.size, new Set(pixels).size);
+  let flagged = 0;
+  for (const [i, [count, level, unresolved]] of got) {
+    assert.equal(count, expected[i], `count at ${i}`);
+    assert.equal(level, levels[i], `distance at ${i}`);
+    if (unresolved) { flagged++; assert.equal(count, -1); }
+  }
+  assert.equal(done.samples, pixels.length);
+  assert.equal(done.unresolved, [...pixels].filter(i => got.get(i)[2]).length);
+  assert.ok(flagged > 0 && flagged < got.size, `some pixels left unresolved at this budget (${flagged})`);
+});

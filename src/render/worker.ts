@@ -15,7 +15,7 @@ import { paletteShader } from './palette.ts';
 import { decodeDistance, encodeDistance } from './samples.ts';
 import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
-import type { ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
+import type { PixelRequest, PixelSamples, ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
 import type { Palette } from './palette-names.ts';
 
 let generation = 0;
@@ -71,8 +71,12 @@ self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
     return;
   }
   generation = data.id;
-  wantedKey = 'type' in data ? undefined : data.reference?.key;
+  wantedKey = 'type' in data && data.type !== 'pixels' ? undefined : data.reference?.key;
   if (waiting && waiting.key !== wantedKey) { waiting.reject(CANCELLED); waiting = undefined; }
+  if ('type' in data && data.type === 'pixels') {
+    void samplePixels(data).catch(error => { if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) }); });
+    return;
+  }
   if ('type' in data) return;
   void (data.deepen ? deepen(data) : render(data)).catch(error => {
     if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
@@ -336,4 +340,43 @@ async function deepen(request: RenderRequest): Promise<void> {
   if (finished?.request.id === id) finished = { request: { ...request, deepen: undefined }, tiles: left };
   send({ type: 'pass', id, step: 1, deepen: true, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
     samples, unresolved: sampler?.stats.unresolved ?? 0, pending: countPending(left) });
+}
+
+/**
+ * Sample exactly the pixels a GPU render left to the CPU (see main.ts), in
+ * the order given, and send their counts and distance levels in batches.
+ */
+async function samplePixels(request: PixelRequest): Promise<void> {
+  let lastYield = performance.now();
+  const checkpoint = async () => {
+    if (generation !== request.id) throw CANCELLED;
+    if (performance.now() - lastYield < 8) return;
+    await yieldToEvents();
+    lastYield = performance.now();
+    if (generation !== request.id) throw CANCELLED;
+  };
+  const { id, view, width, height, cssWidth, cssHeight, iterations, reference, pixels } = request;
+  const source = reference && (() => sharedReference(reference));
+  // Worker 0 builds the shared orbit even without pixels of its own: the others wait for it.
+  const sampler = pixels.length || reference?.build
+    ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
+  const physical = width / cssWidth, toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
+  let start = 0, lastFlush = performance.now(), unresolved = 0;
+  const counts = new Float32Array(pixels.length), distances = new Uint8Array(pixels.length), flags = new Uint8Array(pixels.length);
+  const flush = (end: number, done?: PixelSamples['done']) => {
+    const indices = pixels.slice(start, end), batchCounts = counts.slice(start, end), batchDistances = distances.slice(start, end);
+    const batchFlags = flags.slice(start, end);
+    send({ type: 'samples', id, indices, counts: batchCounts, distances: batchDistances, unresolved: batchFlags, done },
+      [indices.buffer, batchCounts.buffer, batchDistances.buffer, batchFlags.buffer]);
+    start = end; lastFlush = performance.now();
+  };
+  for (let k = 0; k < pixels.length; k++) {
+    const index = pixels[k], x = index % width, y = (index - x) / width;
+    counts[k] = sampler!.sample(toCss(x, width, cssWidth), toCss(y, height, cssHeight));
+    distances[k] = encodeDistance(lastDistance() * physical);
+    if (lastUnresolved()) { unresolved++; flags[k] = 1; }
+    await checkpoint();
+    if (performance.now() - lastFlush >= FLUSH_MS) flush(k + 1);
+  }
+  flush(pixels.length, { samples: pixels.length, unresolved, fallbacks: sampler?.stats.fallbacks ?? 0 });
 }

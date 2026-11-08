@@ -13,7 +13,10 @@ import type { BudgetMemory } from './render/budget.ts';
 import { gesture, wheelAnchor, wheelLogFactor } from './ui/gestures.ts';
 import { createHud } from './ui/hud.ts';
 import { missingRegions, panRaster, shiftInPlace, shiftQuality } from './render/raster-cache.ts';
-import { decodeDistance } from './render/samples.ts';
+import { decodeDistance, encodeDistance } from './render/samples.ts';
+import { GPU_TILE, GpuRenderer, SUSPECT, UNRESOLVED, yieldToEvents } from './render/gpu-render.ts';
+import type { GpuJob } from './render/gpu-render.ts';
+import { computeOrbit } from './fractal/orbit.ts';
 import { stageSamples, TileStage } from './render/tile-stage.ts';
 import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
 import { isPalette } from './render/palette-names.ts';
@@ -21,7 +24,7 @@ import type { Palette } from './render/palette-names.ts';
 import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
 import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
-import type { ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
+import type { PixelRequest, PixelSamples, ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#mandelbrot')!;
 const context = canvas.getContext('2d', { alpha: false });
@@ -118,6 +121,281 @@ function keepSamples(tile: TileData, regions: RenderRegion[]): void {
   stageSamples(tile, regions, samples.counts, samples.distances, stage.width);
 }
 
+/**
+ * GPU rendering, only with `?gpu` in the page URL (see render/gpu-render.ts),
+ * in tiles from the centre out, staged batch by batch as they are read back:
+ *
+ * 1. A coarse pass (every 4th pixel each way), painted as the workers' coarse
+ *    tiles are. As the workers' coarse pass does for cheap unresolved samples,
+ *    the budget rises at once whenever adaptBudget calls for it, counting the
+ *    unsettled samples (UNRESOLVED or SUSPECT); each raise computes only those.
+ * 2. Every other pixel. Escaped ones are final; the rest are painted black
+ *    (quality 2) for now.
+ * 3. The workers compute exactly the pixels left (taken as inside, suspected,
+ *    unresolved, or where z cancelled against the reference), by tile from the
+ *    centre out: they prove the interior ones, and report which stayed
+ *    unresolved.
+ * 4. Those decide the budget as after a workers' draft (adaptBudget): on a
+ *    raise the GPU computes them again, and the workers take whatever it still
+ *    leaves. So the budget follows the same rule as the workers' renders: the
+ *    GPU alone cannot tell interior pixels near the boundary from orbits that
+ *    need more iterations, the workers' proofs can.
+ *
+ * The orbit is the workers' shared one (worker 0 builds it, off the main
+ * thread), so the workers need none of their own afterwards; shallow views,
+ * which have none, get one at the view centre here. Without WebGPU, or below
+ * MIN_LOG_SCALE, renders are the workers' alone, as before.
+ */
+let gpu: GpuRenderer | undefined;
+/** Renders wait (at most 2 s) for the GPU while it starts, rather than start on the workers and be thrown away. */
+let gpuStarting = new URLSearchParams(location.search).has('gpu');
+if (gpuStarting) {
+  const ready = (renderer?: GpuRenderer) => {
+    if (!gpuStarting) return;
+    gpuStarting = false;
+    gpu = renderer;
+    if (view) startRender();
+  };
+  void GpuRenderer.create().then(ready);
+  setTimeout(() => ready(), 2000);
+}
+/** The current GPU render's handler for the workers' samples, and how to release it when a newer render starts. */
+let gpuFix: ((message: PixelSamples) => void) | undefined;
+let gpuFixRelease: (() => void) | undefined;
+/** GPU renders waiting for the shared orbit with this key (all released when a new render starts). */
+let orbitWaiters: { key: number; resolve: () => void }[] = [];
+/** A pixel the workers proved interior (final, black). */
+const PROVEN = -5;
+
+const usesGpu = (target: View) => !!gpu?.usable && GpuRenderer.serves(target);
+
+/** Give the job the orbit for `iterations`: the shared one (built by worker 0), or one at the view centre for shallow views. */
+async function gpuOrbit(job: GpuJob, id: number, target: Surface, iterations: number): Promise<boolean> {
+  const { view } = target, width = target.canvas.width, height = target.canvas.height;
+  const shared = planReference(view, iterations);
+  if (!shared) {
+    let lastYield = performance.now();
+    const stale = new Error('stale');
+    const data = await computeOrbit(view, iterations, async () => {
+      if (performance.now() - lastYield < 8) return;
+      await yieldToEvents();
+      lastYield = performance.now();
+      if (generation !== id) throw stale;
+    }).catch(error => { if (error === stale) return undefined; throw error; });
+    if (!data || generation !== id) return false;
+    job.setOrbit(data, 0, 0);
+    return true;
+  }
+  canvas.dataset.referenceKey = String(shared.key);
+  if (!shared.orbit) {
+    if (!workers.length) createWorker();
+    // Worker 0 builds it (a request with no pixels of its own); the 'reference' message releases us.
+    if (workerOrbitKeys[0] !== shared.key) {
+      workers[0].postMessage({ type: 'pixels', id, view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight,
+        iterations, reference: referencePlan(shared, 0), pixels: new Uint32Array(0) } satisfies PixelRequest);
+    }
+    await new Promise<void>(resolve => orbitWaiters.push({ key: shared.key, resolve }));
+    if (generation !== id || !shared.orbit) return false;
+  }
+  const offset = referenceOffset(shared.spec, view, viewLogRadius(view, target.cssWidth, target.cssHeight), iterations);
+  if (!offset) return false;
+  job.setOrbit(shared.orbit, offset.re * 2 ** offset.exp, offset.im * 2 ** offset.exp);
+  return true;
+}
+
+async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: boolean): Promise<void> {
+  const width = target.canvas.width, height = target.canvas.height, pixels = width * height;
+  const current = () => generation === id && surface === target;
+  shaders ??= await import('./render/palette.ts');
+  if (!current() || !stage) return;
+  const job = gpu!.job({ view: target.view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight, current });
+  const started = performance.now(), logScale = target.view.logScale, physical = width / target.cssWidth;
+  const T = GPU_TILE;
+  // Every tile, nearest the centre first.
+  const tiles: [number, number][] = [];
+  for (let y = 0; y < height; y += T) for (let x = 0; x < width; x += T) tiles.push([x, y]);
+  const centre = ([x, y]: readonly [number, number]) => (x + T / 2 - width / 2) ** 2 + (y + T / 2 - height / 2) ** 2;
+  tiles.sort((a, b) => centre(a) - centre(b));
+  const within = (mask: Uint8Array, [x0, y0]: readonly [number, number], step: number) => {
+    for (let y = y0; y < Math.min(height, y0 + T); y += step) for (let x = x0; x < Math.min(width, x0 + T); x += step) if (mask[y * width + x]) return true;
+    return false;
+  };
+  // Per pixel: the GPU's result, or the workers' once they have one (PROVEN for interior); NaN: not computed.
+  // How many are computed, and how many of those unsettled (UNRESOLVED or SUSPECT).
+  const counts = new Float32Array(pixels).fill(NaN), distances = new Float32Array(pixels);
+  let computed = 0, unsettled = 0;
+  const isUnsettled = (count: number) => count === UNRESOLVED || count === SUSPECT;
+  const level = (i: number) => counts[i] >= 0 && distances[i] >= 0 ? encodeDistance(distances[i] * physical) : 255;
+  const shade = () => shaders!.paletteShader(palette);
+  const stageCoarse = ([x, y]: readonly [number, number]) => {
+    const step = 4, clipWidth = Math.min(T, width - x), clipHeight = Math.min(T, height - y);
+    const columns = Math.ceil(clipWidth / step), rows = Math.ceil(clipHeight / step), colour = shade();
+    const words = new Uint32Array(columns * rows), tileCounts = new Float32Array(columns * rows), levels = new Uint8Array(columns * rows);
+    for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+      const i = (y + row * step) * width + x + column * step, k = row * columns + column;
+      tileCounts[k] = counts[i] >= 0 ? counts[i] : -1; levels[k] = level(i);
+      words[k] = colour(tileCounts[k], decodeDistance(levels[k]));
+    }
+    const tile: TileData = { x, y, width: columns, height: rows, step, clipWidth, clipHeight, edgeRight: x + T >= width, edgeBottom: y + T >= height,
+      pixels: new Uint8ClampedArray(words.buffer), counts: tileCounts, distances: levels, palette };
+    keepSamples(tile, stage!.add(tile, quality));
+  };
+  // Final pixels (escaped, or proved) at quality 1; those left to the workers black at quality 2.
+  // Per tile (by origin), its pixels left to the workers, row by row: kept as each tile is staged.
+  const leftover = new Map<number, Uint32Array>();
+  const stageFine = ([x, y]: readonly [number, number]) => {
+    const w = Math.min(T, width - x), h = Math.min(T, height - y), colour = shade();
+    const words = new Uint32Array(w * h), levels = new Uint8Array(w * h), claims = new Uint8Array(w * h);
+    const left = new Uint32Array(w * h);
+    let lefts = 0;
+    for (let row = 0; row < h; row++) for (let column = 0; column < w; column++) {
+      const i = (y + row) * width + x + column, k = row * w + column, count = counts[i];
+      if (reused[i] || Number.isNaN(count)) continue;
+      levels[k] = level(i);
+      words[k] = colour(count >= 0 ? count : -1, decodeDistance(levels[k]));
+      claims[k] = count >= 0 || count === PROVEN ? 1 : 2;
+      if (claims[k] === 2) left[lefts++] = i;
+    }
+    leftover.set(y * width + x, left.slice(0, lefts));
+    const painted = stage!.addBlock(x, y, w, h, words, claims, quality);
+    samples ??= { counts: new Float32Array(pixels).fill(NaN), distances: new Uint8Array(pixels) };
+    for (let row = 0; row < h; row++) for (let column = 0; column < w; column++) {
+      const k = row * w + column, i = (y + row) * width + x + column;
+      if (painted[k]) { samples.counts[i] = counts[i] >= 0 ? counts[i] : -1; samples.distances[i] = levels[k]; }
+    }
+  };
+  // Run a pass, storing its samples and staging each tile as its batch arrives.
+  const run = async (iterations: number, step: number, list: readonly (readonly [number, number])[], mask: Uint8Array | undefined,
+    stageTile: (tile: readonly [number, number]) => void) => job.pass({ iterations, step, tiles: list, mask, onBatch: ({ first, count, side, values }) => {
+    for (let t = 0; t < count; t++) {
+      const [x0, y0] = list[first + t];
+      for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+        const x = x0 + i * step, y = y0 + j * step, index = y * width + x;
+        if (x >= width || y >= height || (mask && !mask[index])) continue;
+        const at = 2 * ((t * side + j) * side + i), was = counts[index], value = values[at];
+        if (Number.isNaN(was)) computed++;
+        else if (isUnsettled(was)) unsettled--;
+        if (isUnsettled(value)) unsettled++;
+        counts[index] = value; distances[index] = values[at + 1];
+      }
+      stageTile(list[first + t]);
+    }
+    scheduleDraw();
+  } });
+  // The workers sample `list` exactly; resolves with the pixels they left unresolved (undefined once stale).
+  const onCpu = (list: Uint32Array) => new Promise<number[] | undefined>(resolve => {
+    activeWorkerCount = renderWorkerCount(workerLimit, list.length * 32, logScale, iterations);
+    canvas.dataset.workers = String(activeWorkerCount);
+    while (workers.length < activeWorkerCount) createWorker();
+    // Dealt round-robin (the list runs from the centre out), so every worker starts near the centre.
+    // These are the costly pixels (proofs, budget-long orbits): counted as blocks of 32 above, so even
+    // a few thousand get every worker the reference memory allows.
+    const shares = Array.from({ length: activeWorkerCount }, (_, w) => new Uint32Array(Math.ceil((list.length - w) / activeWorkerCount)));
+    list.forEach((i, k) => { shares[k % activeWorkerCount][Math.floor(k / activeWorkerCount)] = i; });
+    const unresolved: number[] = [];
+    let reports = 0;
+    gpuFixRelease = () => resolve(undefined);
+    gpuFix = message => {
+      if (!current() || !stage || !shaders) return;
+      const colour = shade(), words = new Uint32Array(message.indices.length);
+      samples ??= { counts: new Float32Array(pixels).fill(NaN), distances: new Uint8Array(pixels) };
+      for (let k = 0; k < words.length; k++) {
+        const i = message.indices[k], count = message.counts[k], distance = decodeDistance(message.distances[k]);
+        words[k] = colour(count, distance);
+        samples.counts[i] = count; samples.distances[i] = message.distances[k];
+        if (message.unresolved[k]) { unresolved.push(i); counts[i] = UNRESOLVED; } else counts[i] = count >= 0 ? count : PROVEN;
+        distances[i] = Number.isFinite(distance) ? distance / physical : -1;
+      }
+      stage.addPixels(message.indices, words, quality);
+      scheduleDraw();
+      if (message.done && ++reports === activeWorkerCount) {
+        gpuFix = gpuFixRelease = undefined;
+        resolve(unresolved);
+      }
+    };
+    const shared = planReference(target.view, iterations);
+    workers.forEach((worker, workerIndex) => {
+      if (workerIndex >= activeWorkerCount) return;
+      const share = shares[workerIndex];
+      worker.postMessage({ type: 'pixels', id, view: target.view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight,
+        iterations, reference: shared && referencePlan(shared, workerIndex), pixels: share } satisfies PixelRequest, [share.buffer]);
+    });
+  });
+  const leftIn = (list: readonly (readonly [number, number])[]) => {
+    const parts = list.map(([x, y]) => leftover.get(y * width + x) ?? new Uint32Array(0)), all = new Uint32Array(parts.reduce((n, part) => n + part.length, 0));
+    let at = 0;
+    for (const part of parts) { all.set(part, at); at += part.length; }
+    return all;
+  };
+  let iterations = target.iterations, runs = 0, cpuPixels = 0;
+  try {
+    if (!await gpuOrbit(job, id, target, iterations)) return;
+    // 1. Coarse pass (whole renders only: after a pan most of the view is there already). Its unsettled
+    // samples are cheap to compute again here, so the budget rises as the workers' coarse pass raises it
+    // for cheap ones: whenever adaptBudget calls for it.
+    if (!pan) {
+      runs++;
+      if (!await run(iterations, 4, tiles, undefined, stageCoarse)) return;
+      canvas.dataset.gpuFirstMs = String(Math.round(performance.now() - started));
+      coarseReady = true;
+      completedStep = 4;
+      while (computed && unsettled) {
+        const adapted = adaptBudget(budgetMemory, logScale, iterations, computed, unsettled);
+        budgetMemory = adapted.memory;
+        if (!adapted.raise) break;
+        iterations = adapted.memory!.iterations;
+        target.iterations = iterations;
+        canvas.dataset.iterations = String(iterations);
+        if (!await gpuOrbit(job, id, target, iterations)) return;
+        const mask = new Uint8Array(pixels);
+        for (let i = 0; i < pixels; i++) if (isUnsettled(counts[i])) mask[i] = 1;
+        runs++;
+        if (!await run(iterations, 4, tiles.filter(tile => within(mask, tile, 4)), mask, stageCoarse)) return;
+      }
+    }
+    // 2. Every other pixel (the coarse samples are done, at this budget).
+    const mask = new Uint8Array(pixels);
+    for (let i = 0; i < pixels; i++) mask[i] = reused[i] || !Number.isNaN(counts[i]) ? 0 : 1;
+    await yieldToEvents();
+    if (!current()) return;
+    runs++;
+    if (!await run(iterations, 1, tiles.filter(tile => within(mask, tile, 1)), mask, stageFine)) return;
+    canvas.dataset.gpuFirstMs ??= String(Math.round(performance.now() - started));
+    coarseReady = true;
+    completedStep = 1;
+    // 3, 4. The workers' share, and raises as their results call for.
+    let fresh = 0;
+    for (let i = 0; i < pixels; i++) fresh += 1 - reused[i];
+    for (let list = leftIn(tiles); list.length;) {
+      cpuPixels += list.length;
+      canvas.dataset.cpuPixels = String(cpuPixels);
+      const unresolved = await onCpu(list);
+      if (!unresolved || !current()) return;
+      canvas.dataset.cpuUnresolved = String(unresolved.length);
+      const adapted = adaptBudget(budgetMemory, logScale, iterations, fresh, unresolved.length);
+      budgetMemory = adapted.memory;
+      if (!adapted.raise) break;
+      // After a pan the reused pixels keep the old budget: render the whole view at the new one instead.
+      if (pan) { startRender(); return; }
+      iterations = adapted.memory!.iterations;
+      target.iterations = iterations;
+      canvas.dataset.iterations = String(iterations);
+      if (!await gpuOrbit(job, id, target, iterations)) return;
+      const again = new Uint8Array(pixels);
+      for (const i of unresolved) again[i] = 1;
+      const rerun = tiles.filter(tile => within(again, tile, 1));
+      runs++;
+      if (!await run(iterations, 1, rerun, again, stageFine)) return;
+      list = leftIn(rerun);
+    }
+    canvas.dataset.gpuMs = String(Math.round(performance.now() - started));
+    canvas.dataset.gpuRuns = String(runs);
+    finishRender();
+  } finally {
+    job.dispose();
+  }
+}
+
 /** The palette shaders, loaded on the main thread at the first palette switch (they build colour tables). */
 let shaders: typeof import('./render/palette.ts') | undefined;
 
@@ -157,17 +435,24 @@ function project(target: CanvasRenderingContext2D, source: Surface, destination:
  * passes still run (their statistics drive the budget); they just are not
  * painted over the better preview. The final pass always paints.
  */
-function projectedQuality(source: Surface | undefined, completed: number, width: number, height: number): Uint8Array<ArrayBuffer> {
+function projectedQuality(source: Surface | undefined, completed: number, width: number, height: number, previous: Uint8Array): Uint8Array<ArrayBuffer> {
   const result = new Uint8Array(width * height).fill(255);
   if (!source || source.cssWidth !== cssWidth || source.cssHeight !== cssHeight
     || source.canvas.width !== width || source.canvas.height !== height) return result;
   const ratio = 2 ** (source.view.logScale - view.logScale);
+  // The same view again (a raised budget): each pixel keeps the quality it had, so passes no
+  // finer than what is shown (the GPU preview, a finished 2-pixel pass) do not blur it again.
+  const offset = viewOffset(source.view, view);
+  if (ratio === 1 && offset.x === 0 && offset.y === 0 && previous.length === result.length) {
+    for (let i = 0; i < result.length; i++) result[i] = Math.max(2, previous[i]);
+    return result;
+  }
   // At least 2: quality 1 means finished, which a pan would reuse as is. Zoomed
   // out, the preview is sharper still but leaves the borders to the coarse passes.
   const effective = Math.max(2, Math.floor(ratio * completed));
   if (!Number.isFinite(ratio) || effective >= 255) return result;
   // Where the projected old image lands, in physical pixels (inset by a pixel for its soft edge).
-  const offset = viewOffset(source.view, view), scaleX = width / cssWidth, scaleY = height / cssHeight;
+  const scaleX = width / cssWidth, scaleY = height / cssHeight;
   const left = Math.max(0, Math.ceil((cssWidth / 2 + offset.x - source.cssWidth * ratio / 2) * scaleX) + 1);
   const top = Math.max(0, Math.ceil((cssHeight / 2 + offset.y - source.cssHeight * ratio / 2) * scaleY) + 1);
   const right = Math.min(width, Math.floor((cssWidth / 2 + offset.x + source.cssWidth * ratio / 2) * scaleX) - 1);
@@ -217,6 +502,7 @@ const hud = createHud({
 
 function startRender(): void {
   clearTimeout(renderTimer);
+  if (gpuStarting) { scheduleDraw(); return; }
   const iterations = chooseBudget(budgetMemory, view.logScale);
   budgetMemory = rememberUse(budgetMemory, view.logScale);
   // Reused pixels must come from the same budget: a larger one may resolve black pixels.
@@ -255,7 +541,7 @@ function startRender(): void {
     if (surface) project(imageContext, surface, view, cssWidth, cssHeight);
     samples?.counts.fill(NaN);
     // Another palette's preview is only a placeholder: every pass paints over it.
-    quality = projectedQuality(surface?.palette === palette ? surface : undefined, completedStep, image.width, image.height);
+    quality = projectedQuality(surface?.palette === palette ? surface : undefined, completedStep, image.width, image.height, quality);
   }
   const regions = pan ? missingRegions(quality, image.width, image.height)
     : [{ x: 0, y: 0, width: image.width, height: image.height }];
@@ -284,6 +570,25 @@ function startRender(): void {
   canvas.dataset.referenceKey = shared ? String(shared.key) : '';
   renderBase = { id: generation, view: surface.view, width: image.width, height: image.height,
     cssWidth, cssHeight, workerCount: activeWorkerCount, iterations, regions, palette };
+  // A new render releases GPU renders still waiting for an orbit (they then find themselves stale).
+  for (const waiter of orbitWaiters) waiter.resolve();
+  orbitWaiters = [];
+  gpuFixRelease?.();
+  gpuFix = gpuFixRelease = undefined;
+  if (renderPixels && usesGpu(surface.view)) {
+    // The GPU renders; workers drop what they were doing and get the pixels it leaves them.
+    workers.forEach(worker => worker.postMessage({ type: 'cancel', id: generation }));
+    canvas.dataset.gpu = 'true';
+    canvas.dataset.referenceKey = '';
+    delete canvas.dataset.gpuFirstMs;
+    // Only a pan reuses final pixels (quality 1); otherwise none are.
+    const reused = new Uint8Array(quality.length);
+    if (pan) for (let i = 0; i < quality.length; i++) if (quality[i] === 1) reused[i] = 1;
+    void gpuRender(generation, surface, reused, !!pan).catch(error => console.error('GPU render failed:', error));
+    scheduleDraw();
+    return;
+  }
+  canvas.dataset.gpu = '';
   workers.forEach((worker, workerIndex) => {
     if (workerIndex >= activeWorkerCount) {
       worker.postMessage({ type: 'cancel', id: generation });
@@ -362,6 +667,11 @@ function settle(): void {
     });
     return;
   }
+  finishRender();
+}
+
+function finishRender(): void {
+  flushTiles();
   canvas.dataset.deepening = '';
   canvas.dataset.rendered = 'true';
   canvas.dataset.renderMs = String(Math.round(performance.now() - lastRender));
@@ -376,6 +686,7 @@ function createWorker(): void {
       // Still useful after newer generations when they reuse the same reference.
       if (sharedOrbit?.key !== data.key) return;
       sharedOrbit.orbit = data.orbit;
+      orbitWaiters = orbitWaiters.filter(waiter => waiter.key !== data.key || (waiter.resolve(), false));
       workers.forEach((other, workerIndex) => {
         if (workerOrbitKeys[workerIndex] === data.key) return;
         if (other === worker) { workerOrbitKeys[workerIndex] = data.key; return; }
@@ -391,6 +702,11 @@ function createWorker(): void {
       canvas.dataset.rendered = 'error';
       canvas.setAttribute('aria-busy', 'false');
       console.error(data.message);
+      return;
+    }
+    if (data.type === 'samples') {
+      // A request with no pixels only had worker 0 build the shared orbit.
+      gpuFix?.(data);
       return;
     }
     if (data.type === 'pass') {

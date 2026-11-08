@@ -30,7 +30,24 @@ export interface ReferenceDelivery { type: 'reference'; key: number; spec: Refer
  */
 export interface PaletteSwitch { type: 'palette'; id: number; palette: Palette }
 
-export type RenderCommand = RenderRequest | ReferenceDelivery | PaletteSwitch | { type: 'cancel'; id: number };
+/**
+ * Main thread -> worker: sample exactly the listed pixels (indices y width + x
+ * into the surface) of render `id`, the ones GPU rendering left to the CPU.
+ */
+export interface PixelRequest {
+  type: 'pixels';
+  id: number;
+  view: View;
+  width: number;
+  height: number;
+  cssWidth: number;
+  cssHeight: number;
+  iterations: number;
+  reference?: ReferencePlan;
+  pixels: Uint32Array<ArrayBuffer>;
+}
+
+export type RenderCommand = RenderRequest | PixelRequest | ReferenceDelivery | PaletteSwitch | { type: 'cancel'; id: number };
 
 export interface RenderRequest {
   id: number;
@@ -105,4 +122,20 @@ export interface RenderProgress {
 /** Worker -> main thread: the orbit a `build` plan produced. */
 export interface ReferenceBuilt { type: 'reference'; key: number; orbit: OrbitData }
 
-export type RenderMessage = ReferenceBuilt | RenderTiles | RenderProgress | { type: 'error'; id: number; message: string };
+/**
+ * Worker -> main thread: exact samples of a PixelRequest's pixels, batched;
+ * `done` on the last batch, with how many reached the budget unresolved.
+ */
+export interface PixelSamples {
+  type: 'samples';
+  id: number;
+  indices: Uint32Array<ArrayBuffer>;
+  /** Smooth escape counts (INTERIOR for interior) and outline distance levels (see samples.ts). */
+  counts: Float32Array<ArrayBuffer>;
+  distances: Uint8Array<ArrayBuffer>;
+  /** 1 where the sample reached the budget neither escaped nor proved interior. */
+  unresolved: Uint8Array<ArrayBuffer>;
+  done?: { samples: number; unresolved: number; fallbacks: number };
+}
+
+export type RenderMessage = ReferenceBuilt | RenderTiles | RenderProgress | PixelSamples | { type: 'error'; id: number; message: string };

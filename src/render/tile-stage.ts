@@ -91,6 +91,42 @@ export class TileStage {
     return regions;
   }
 
+  /**
+   * Stage a block of single pixels at (x, y), each at its own quality
+   * `claims[k]` (0: not part of it), where nothing that good or better is
+   * (as claimTile). Returns which pixels it painted (1).
+   */
+  addBlock(x: number, y: number, width: number, height: number, source: Uint32Array, claims: Uint8Array, quality: Uint8Array): Uint8Array {
+    const painted = new Uint8Array(width * height);
+    let any = false;
+    for (let row = 0; row < height; row++) {
+      for (let column = 0, k = row * width, i = (y + row) * this.width + x; column < width; column++, k++, i++) {
+        const claim = claims[k];
+        if (!claim || quality[i] < claim) continue;
+        quality[i] = claim; this.words[i] = source[k]; painted[k] = 1; any = true;
+      }
+    }
+    if (any) {
+      this.left = Math.min(this.left, x);
+      this.top = Math.min(this.top, y);
+      this.right = Math.max(this.right, x + width);
+      this.bottom = Math.max(this.bottom, y + height);
+    }
+    return painted;
+  }
+
+  /** Stage single final pixels (indices y width + x), whatever was there. */
+  addPixels(indices: Uint32Array, source: Uint32Array, quality: Uint8Array): void {
+    for (let k = 0; k < indices.length; k++) {
+      const i = indices[k], x = i % this.width, y = (i - x) / this.width;
+      quality[i] = 1; this.words[i] = source[k];
+      if (x < this.left) this.left = x;
+      if (x >= this.right) this.right = x + 1;
+      if (y < this.top) this.top = y;
+      if (y >= this.bottom) this.bottom = y + 1;
+    }
+  }
+
   /** The staged rectangle to upload, or undefined when nothing is pending. */
   pending(): RenderRegion | undefined {
     if (!this.dirty) return undefined;
