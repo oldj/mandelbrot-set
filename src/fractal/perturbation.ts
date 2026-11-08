@@ -3,7 +3,8 @@
  * reference orbit Z, with BLA skipping, rebasing to the reference start when
  * |z| < |δ|, glitch fallback to BigInt, the distance estimate, and the
  * interior proofs of ./interior.ts. perturbNative covers views down to 2^-900;
- * perturbExtended carries a separate exponent below that.
+ * perturbExtended carries a separate exponent below that, and runs in doubles
+ * wherever δ (and a proof's radii) are back inside double range.
  */
 import { add, extended, linear, logAdd, logMagnitude, magnitude, perturbStep, ZERO } from '../math/extended.ts';
 import type { Extended } from '../math/extended.ts';
@@ -215,6 +216,16 @@ const LOG_NEWTON_LOW = 0.5 * Math.log2(1 - NEWTON_BAND), LOG_NEWTON_HIGH = 0.5 *
 const LOG_NEWTON_RETURN = 0.5 * Math.log2(NEWTON_RETURN_SQUARED);
 /** log2 |base| below which proofs get the larger allowance (see perturbExtended). */
 const SMALL_BASE = -10;
+/** perturbExtended's fast path keeps |δ| and |z| at least 2^-500 (squares at least FAST_SQUARED), far from double underflow. */
+const FAST_LOG = -500, FAST_SQUARED = 2 ** -1000;
+/**
+ * dc is scaled by 2^DC_SHIFT for the fast path's BLA blocks: at the depths it serves (|dc| ~ 2^-900
+ * and below) B dc 2^DC_SHIFT stays far from overflow, and a block where it would not is left to the
+ * general path.
+ */
+const DC_SHIFT = 600, DC_UNSHIFT = 2 ** -DC_SHIFT;
+/** Proof steps run in doubles while every radius lies within [FAST_RADIUS, 1 / FAST_RADIUS], each update rounded up by UP. */
+const FAST_RADIUS_LOG = -900, FAST_RADIUS = 2 ** FAST_RADIUS_LOG, UP = 1 + 2 ** -48;
 
 /**
  * Extended-exponent perturbation, with the interior proofs of perturbNative
@@ -238,29 +249,169 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
   // The proof's start as orbit state (index and δ), for the next pixel's hint.
   let verify = 0, spent = 0, steps = 0, start = ZERO, startM = 0, startDelta = ZERO, startPeriod = 0, startError = -Infinity, logRadius0 = -Infinity;
   const logRadii = [-Infinity, -Infinity, -Infinity, -Infinity];
+  const real = reference.real, imag = reference.imag, skip = reference.skipRadiusSquared, end = real.length - 1;
+  // Steps may drop dc when it is below 2^-64 of any δ the fast path keeps (see below).
+  const fast = logDc < 0.5 * Math.log2(FAST_SQUARED) - 64;
+  // dc 2^DC_SHIFT in doubles, for BLA blocks' B dc (0 only where B dc is far below any δ kept).
+  const dcShifted = 2 ** (dc.exp + DC_SHIFT), dcr = dc.re * dcShifted, dci = dc.im * dcShifted;
   while (n < limit) {
-    steps++;
-    const block = verify ? undefined : lookupExtended(reference, m, logDelta, limit - n);
-    const skipped = block !== undefined;
-    if (block) {
-      const derivative = linear(block.a, { re: er, im: ei, exp: eExp }, block.b, pixel);
-      er = derivative.re; ei = derivative.im; eExp = derivative.exp; lift = 2 ** (logPixel - eExp);
-      delta = linear(block.a, delta, block.b, dc);
-      m += block.length; n += block.length; stats.skipped += block.length - 1;
-    } else {
-      if (verify) {
-        const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];
-        const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
-        for (let i = 0; i < 4; i++) {
-          logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
-          largest = Math.max(largest, Math.abs(logRadii[i]));
+    // Fast path: the loop in doubles while δ and z are well inside double
+    // range, as perturbNative. Only dc lies outside it. Single steps need not
+    // add it: |dc| < 2^-64 |δ'| here, so dc changes δ' by less than its
+    // rounding. BLA blocks add B dc, formed as B (dc 2^DC_SHIFT) 2^-DC_SHIFT
+    // (exact scalings; with |B| < 2^1024, a term lost to underflow there is
+    // below 2^-640). A step or block whose δ' would leave the range, or
+    // whose results overflow, is left to the general path below. Single
+    // steps are taken exactly, and blocks only from two steps up, as in
+    // perturbNative. After each step or block the loop leaves wherever the
+    // general path would do anything but iterate on: z escapes, nears the
+    // glitch bound or leaves the range, the base resets, or the step is one
+    // the proof bookkeeping acts on (its tests as in perturbNative, with
+    // margins for the log2 tests the general path makes). Proofs (verify)
+    // always run the general path.
+    let stepped = false;
+    if (fast && !verify && logDelta > FAST_LOG && logDelta < 8) {
+      let dr = delta.re * 2 ** delta.exp, di = delta.im * 2 ** delta.exp, deltaSquared = dr * dr + di * di;
+      // The base in doubles: 0 where |base|² underflows, and then no z this path keeps comes near it.
+      const baseSquared = base ? 2 ** (2 * baseLog) : Infinity, far = baseSquared * (1 + 2 * NEWTON_BAND) * (1 + 1e-9);
+      const baseRe = base ? base.re * 2 ** base.exp : 0, baseIm = base ? base.im * 2 ** base.exp : 0;
+      while (n < limit) {
+        const quick = skip[m];
+        const level = (quick >= 1e-280 ? deltaSquared < quick : quick > 0) ? lookupNative(reference, m, dr, di, limit - n) : -1;
+        let nextRe: number, nextIm: number, nextEr: number, nextEi: number, length = 1;
+        if (level >= 1) {
+          const table = reference.native[level], o = ((m - 1) >> level) * NATIVE_FIELDS;
+          const ar = table[o], ai = table[o + 1], br = table[o + 2], bi = table[o + 3];
+          nextRe = ar * dr - ai * di + (br * dcr - bi * dci) * DC_UNSHIFT;
+          nextIm = ar * di + ai * dr + (br * dci + bi * dcr) * DC_UNSHIFT;
+          nextEr = ar * er - ai * ei + br * lift;
+          nextEi = ar * ei + ai * er + bi * lift;
+          length = 1 << level;
+        } else {
+          const ur = real[m] + zr, ui = imag[m] + zi;
+          nextRe = ur * dr - ui * di; nextIm = ur * di + ui * dr;
+          nextEr = 2 * (zr * er - zi * ei) + lift; nextEi = 2 * (zr * ei + zi * er);
+        }
+        const nextSquared = nextRe * nextRe + nextIm * nextIm;
+        if (!(nextSquared >= FAST_SQUARED && nextSquared <= 2 ** 16) || !Number.isFinite(nextEr + nextEi)) break;
+        steps++;
+        er = nextEr; ei = nextEi;
+        if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
+        dr = nextRe; di = nextIm; deltaSquared = nextSquared;
+        m += length; n += length; stats.skipped += length - 1;
+        const Zr = real[m], Zi = imag[m], totalRe = Zr + dr, totalIm = Zi + di, squared = totalRe * totalRe + totalIm * totalIm;
+        zr = totalRe; zi = totalIm;
+        if (!(squared <= 256 && squared >= FAST_SQUARED) || squared * 2 ** 47 < Zr * Zr + Zi * Zi || n >= reset) {
+          stepped = true;
+          break;
+        }
+        if (squared <= far) {
+          const relative = squared - baseSquared, period = n - baseN;
+          // A new smallest |z| (or a collapse) moves the base.
+          if (relative < baseSquared * 1e-9) { stepped = true; break; }
+          // A return close enough for attractingCycleExtended or an in-loop proof, with allowance for either.
+          if (n >= PROOF_START && period > 2 && relative < NEWTON_BAND * 1.001 * baseSquared) {
+            const ex = totalRe - baseRe, ey = totalIm - baseIm, allowance = baseLog < SMALL_BASE ? Math.max(steps, n / 8) : steps;
+            if (ex * ex + ey * ey < NEWTON_RETURN_SQUARED * 1.001 * baseSquared
+              && ((n >= newtonRetry && spent + NEWTON_COST * period <= allowance)
+                || ((n >= retry || baseLog < failedLog - 10) && spent + period <= allowance))) { stepped = true; break; }
+          }
+        }
+        if (squared < deltaSquared || m === end) { dr = totalRe; di = totalIm; deltaSquared = squared; m = 0; }
+      }
+      delta = extended(dr, di);
+      logDelta = logMagnitude(delta);
+      if (!stepped && n >= limit) break;
+    } else if (fast && verify > 1 && logDelta > FAST_LOG && logDelta < 8 && logRadii[0] > FAST_RADIUS_LOG) {
+      // A proof's steps in doubles while its radii are well inside double
+      // range too, with perturbNative's bounds: each step's rounding, plus
+      // |dc| for the dc the step leaves out (dcBound, at least 2^-1000, far
+      // below any radius kept), and each radius rounded up by UP. A radius
+      // already past the final comparison's bound and at least 1 (it never
+      // shrinks again, as in the general path) is carried as Infinity; when
+      // all four are, the proof has failed. The last step, with the final
+      // comparison, is the general path's.
+      let dr = delta.re * 2 ** delta.exp, di = delta.im * 2 ** delta.exp, deltaSquared = dr * dr + di * di;
+      const bound0 = 2 ** logRadius0 * (1 + 2 ** -40), bound1 = bound0 * 2 ** 8, bound2 = bound0 * 2 ** 16, bound3 = bound0 * 2 ** 24;
+      const radius = (logRadius: number, bound: number) => {
+        const r = 2 ** logRadius * UP;
+        return r >= 1 && r > bound ? Infinity : r;
+      };
+      let ra = radius(logRadii[0], bound0), rb = radius(logRadii[1], bound1), rc = radius(logRadii[2], bound2), rd = radius(logRadii[3], bound3);
+      const dcBound = Math.max(2 ** (logDc + 1), 2 ** -1000);
+      while (verify > 1 && n < limit && ra >= FAST_RADIUS && (rd <= 1 / FAST_RADIUS || rd === Infinity)) {
+        const Zr = real[m], Zi = imag[m], ur = Zr + zr, ui = Zi + zi, nextRe = ur * dr - ui * di, nextIm = ur * di + ui * dr;
+        const nextSquared = nextRe * nextRe + nextIm * nextIm;
+        if (!(nextSquared >= FAST_SQUARED && nextSquared <= 2 ** 16)) break;
+        steps++;
+        const reference = SQRT2 * Math.max(Math.abs(Zr), Math.abs(Zi)), deltaBound = SQRT2 * Math.max(Math.abs(dr), Math.abs(di));
+        const twice = 2 * Math.sqrt(zr * zr + zi * zi + TINY_SQUARE), rounding = ROUNDING * (4 * reference * deltaBound + deltaBound * deltaBound) + dcBound;
+        ra = (ra * (twice + ra) + rounding) * UP; rb = (rb * (twice + rb) + rounding) * UP;
+        rc = (rc * (twice + rc) + rounding) * UP; rd = (rd * (twice + rd) + rounding) * UP;
+        if (ra >= 1 && ra > bound0) ra = Infinity;
+        if (rb >= 1 && rb > bound1) rb = Infinity;
+        if (rc >= 1 && rc > bound2) rc = Infinity;
+        if (rd >= 1 && rd > bound3) rd = Infinity;
+        if (ra === Infinity) {
+          // Every radius is past its bound (they keep their order): the step is left to the general path, without the proof.
+          verify = 0; base = undefined; baseLog = Infinity; collapsedBase = false; retry = 2 * n; failedLog = startLog;
+          break;
+        }
+        const nextEr = 2 * (zr * er - zi * ei) + lift;
+        ei = 2 * (zr * ei + zi * er); er = nextEr;
+        if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
+        dr = nextRe; di = nextIm; deltaSquared = nextSquared;
+        m++; n++;
+        const Yr = real[m], Yi = imag[m], totalRe = Yr + dr, totalIm = Yi + di, squared = totalRe * totalRe + totalIm * totalIm;
+        zr = totalRe; zi = totalIm;
+        if (!(squared <= 256 && squared >= FAST_SQUARED) || squared * 2 ** 47 < Yr * Yr + Yi * Yi) { stepped = true; break; }
+        verify--;
+        if (squared < deltaSquared || m === end) {
+          // Representing z as Z + δ rounds once more; rebasing makes that the new state.
+          const error = ROUNDING * SQRT2 * (Math.max(Math.abs(Yr), Math.abs(Yi)) + Math.max(Math.abs(dr), Math.abs(di)));
+          ra += error; rb += error; rc += error; rd += error;
+          dr = totalRe; di = totalIm; deltaSquared = squared; m = 0;
         }
       }
-      const nextEr = 2 * (zr * er - zi * ei) + lift;
-      ei = 2 * (zr * ei + zi * er); er = nextEr;
-      if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
-      delta = perturbStep(orbit[m], delta, dc);
-      m++; n++;
+      // Back to log2 radii, rounded up.
+      logRadii[0] = Math.log2(ra) + 1e-9; logRadii[1] = Math.log2(rb) + 1e-9;
+      logRadii[2] = Math.log2(rc) + 1e-9; logRadii[3] = Math.log2(rd) + 1e-9;
+      for (const logRadius of logRadii) if (logRadius < Infinity) largest = Math.max(largest, Math.abs(logRadius));
+      delta = extended(dr, di);
+      logDelta = logMagnitude(delta);
+      if (!stepped && n >= limit) break;
+    }
+    if (!stepped) {
+      steps++;
+      const block = verify ? undefined : lookupExtended(reference, m, logDelta, limit - n);
+      if (block) {
+        const derivative = linear(block.a, { re: er, im: ei, exp: eExp }, block.b, pixel);
+        er = derivative.re; ei = derivative.im; eExp = derivative.exp; lift = 2 ** (logPixel - eExp);
+        delta = linear(block.a, delta, block.b, dc);
+        m += block.length; n += block.length; stats.skipped += block.length - 1;
+      } else {
+        if (verify) {
+          const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];
+          const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
+          for (let i = 0; i < 4; i++) {
+            logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
+            largest = Math.max(largest, Math.abs(logRadii[i]));
+          }
+          // A radius of 1 or more never shrinks again (r (2|z| + r) >= r², and rebasing only
+          // adds): once every radius is past what the final comparison allows, the proof has
+          // failed, and the rest of its period need not run (escaping orbits that pass a
+          // return fail this way, often with radii past 2^1000 within a few dozen steps).
+          if (logRadii[0] >= 0 && logRadii[0] > logRadius0 && logRadii[1] > logRadius0 + 8
+            && logRadii[2] > logRadius0 + 16 && logRadii[3] > logRadius0 + 24) {
+            verify = 0; base = undefined; baseLog = Infinity; collapsedBase = false; retry = 2 * n; failedLog = startLog;
+          }
+        }
+        const nextEr = 2 * (zr * er - zi * ei) + lift;
+        ei = 2 * (zr * ei + zi * er); er = nextEr;
+        if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
+        delta = perturbStep(orbit[m], delta, dc);
+        m++; n++;
+      }
     }
     logDelta = logMagnitude(delta);
     const z = orbit[m], logReference = orbitLog[m];

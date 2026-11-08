@@ -219,6 +219,39 @@ test('long-period minibrot interiors below 2^-900 are proved, and proved samples
   for (const [x, y] of edge.slice(0, 3)) assert.equal(oracle(whole, x, y, iterationBudget(whole.logScale) * 4), INTERIOR, `proof at ${x},${y}`);
 });
 
+test('below 2^-900, proofs whose radii fit doubles run in doubles, and stay sound', async () => {
+  // A period-226 minibrot near c = -2, about 2^-898 across, seen whole at 2^-905. Its edge samples'
+  // deltas and proof radii lie well inside double range (unlike a nucleus 2^-994 across, whose
+  // returns come within 2^-1000 of 0), so their steps and proofs run in perturbExtended's double
+  // paths: thousands of proof steps here, and dozens of hopeless proofs given up early.
+  const bits = 1408, one = 1n << BigInt(bits);
+  const view = ensurePrecision({ ...nucleus(-2n * one + (one >> 452n), 0n, 226, bits, 400), bits, logScale: -905 });
+  const limit = iterationBudget(view.logScale), sampler = await createSampler(view, 32, 24, limit, noop);
+  const values = new Map(), proved = new Set();
+  for (let j = 0; j < 24; j++) for (let i = 0; i < 32; i++) {
+    const before = sampler.stats.unresolved, value = sampler.sample((i - 16) * 8, (j - 12) * 8);
+    values.set(`${i},${j}`, value);
+    if (value === INTERIOR && sampler.stats.unresolved === before) proved.add(`${i},${j}`);
+  }
+  const escaped = [...values.values()].filter(value => value !== INTERIOR).length;
+  assert.ok(proved.size > 200 && escaped > 300, `samples on both sides (${proved.size} proved, ${escaped} escaped)`);
+  // Proved samples beside an escaping one stay bounded for four times the budget.
+  const edge = [...proved].filter(key => {
+    const [i, j] = key.split(',').map(Number);
+    return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([di, dj]) => (values.get(`${i + di},${j + dj}`) ?? INTERIOR) !== INTERIOR);
+  });
+  assert.ok(edge.length > 20);
+  for (const key of edge.filter((_, k) => k % 10 === 0)) {
+    const [i, j] = key.split(',').map(Number);
+    assert.equal(oracle(view, (i - 16) * 8, (j - 12) * 8, limit * 4), INTERIOR, `proof at ${key}`);
+  }
+  // Escaping samples agree with BigInt.
+  for (const [i, j] of [[0, 0], [3, 20], [28, 5], [31, 23]]) {
+    assert.notEqual(values.get(`${i},${j}`), INTERIOR);
+    close(values.get(`${i},${j}`), oracle(view, (i - 16) * 8, (j - 12) * 8, limit), 1e-6);
+  }
+});
+
 test('a collapsing orbit below 2^-900 never proves an escaping sample interior', async () => {
   // Near c = -2, a real minibrot centre of period 649 whose critical orbit dives below 2^-13 at
   // step 624 and reaches 0 at 649. View B reuses view A's reference (2^14 shallower), as the app's
