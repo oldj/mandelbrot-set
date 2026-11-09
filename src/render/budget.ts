@@ -11,6 +11,14 @@ export function maxIterations(logScale: number): number {
 }
 /** Raise the budget when more than this share of coarse samples ran out of iterations. */
 const RAISE_FRACTION = 0.01;
+/**
+ * And when more than this share of final pixels did (after the workers' proofs). They stay black,
+ * maybe wrongly, and a raise computes only them again, so it pays for a much smaller share: at 1%,
+ * 0.96% of a seahorse-valley view (1571 pixels at 640x257) stayed black at 2560 iterations, every one
+ * of them escaping by 10240; at 0.1%, 0.09% of another (228 at 640x400) at 1536, all but 12 escaping
+ * by 6144. Raises still stop at the cap, and where they stop helping (see adaptBudget).
+ */
+export const FINAL_RAISE_FRACTION = 0.0001;
 const RAISE_FACTOR = 4;
 /** A raise that leaves this share of the unresolved samples is not paying for itself. */
 const DIMINISHING = 0.7;
@@ -43,15 +51,16 @@ export function rememberUse(memory: BudgetMemory | undefined, logScale: number):
 }
 
 /**
- * After a render's coarse pass at `iterations`: the memory to use next and
- * whether to re-render with its larger budget now. Colours depend only on the
- * escape count, so a larger budget only changes samples that ran out.
+ * After a render's coarse pass at `iterations` (or its final pixels, with
+ * FINAL_RAISE_FRACTION): the memory to use next and whether to raise the
+ * budget now. Colours depend only on the escape count, so a larger budget
+ * only changes samples that ran out.
  */
 export function adaptBudget(memory: BudgetMemory | undefined, logScale: number, iterations: number,
-  samples: number, unresolved: number): { memory: BudgetMemory | undefined; raise: boolean } {
+  samples: number, unresolved: number, raiseFraction = RAISE_FRACTION): { memory: BudgetMemory | undefined; raise: boolean } {
   const fraction = samples ? unresolved / samples : 0;
   const max = maxIterations(logScale);
-  if (samples < 64 || fraction <= RAISE_FRACTION || iterations >= max) return { memory, raise: false };
+  if (samples < 64 || fraction <= raiseFraction || iterations >= max) return { memory, raise: false };
   if (memory?.saturatedAt !== undefined && logScale > memory.saturatedAt - 4) return { memory, raise: false };
   // A raise may not resolve much yet when samples need just a little more; only
   // give up once far above the depth formula and the share is barely falling.

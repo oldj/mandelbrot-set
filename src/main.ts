@@ -8,7 +8,7 @@
  */
 import { initialView, transformView, viewOffset } from './math/precision.ts';
 import type { Point, View } from './math/precision.ts';
-import { adaptBudget, chooseBudget, rememberUse } from './render/budget.ts';
+import { FINAL_RAISE_FRACTION, adaptBudget, chooseBudget, rememberUse } from './render/budget.ts';
 import type { BudgetMemory } from './render/budget.ts';
 import { gesture, wheelAnchor, wheelLogFactor } from './ui/gestures.ts';
 import { createHud } from './ui/hud.ts';
@@ -361,8 +361,13 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       completedStep = 4;
       while (computed && unsettled) {
         const adapted = adaptBudget(budgetMemory, logScale, iterations, computed, unsettled);
-        budgetMemory = adapted.memory;
+        // Only a raise is taken from these samples. The GPU cannot tell interior pixels near the boundary
+        // (often SUSPECT) from late escapers, so their share may barely fall over raises where the view
+        // is mostly interior; adaptBudget would then mark the budget saturated, and that would block
+        // the raise the workers' proofs call for below (0.3231+0.5529i at 4.7e6 stopped at 24576, with
+        // 8% of its pixels unresolved, where the workers alone go on to 98304).
         if (!adapted.raise) break;
+        budgetMemory = adapted.memory;
         iterations = adapted.memory!.iterations;
         target.iterations = iterations;
         canvas.dataset.iterations = String(iterations);
@@ -398,7 +403,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       const unresolved = await onCpu(list);
       if (!unresolved || !current()) return;
       canvas.dataset.cpuUnresolved = String(unresolved.length);
-      const adapted = adaptBudget(budgetMemory, logScale, iterations, fresh, unresolved.length);
+      const adapted = adaptBudget(budgetMemory, logScale, iterations, fresh, unresolved.length, FINAL_RAISE_FRACTION);
       budgetMemory = adapted.memory;
       if (!adapted.raise) break;
       // After a pan the reused pixels keep the old budget: render the whole view at the new one instead.
@@ -675,7 +680,7 @@ function changed(): void {
  */
 function settle(): void {
   flushTiles();
-  const adapted = adaptBudget(budgetMemory, surface!.view.logScale, surface!.iterations, renderPixelCount, pendingPixels);
+  const adapted = adaptBudget(budgetMemory, surface!.view.logScale, surface!.iterations, renderPixelCount, pendingPixels, FINAL_RAISE_FRACTION);
   budgetMemory = adapted.memory;
   if (adapted.raise && renderBase) {
     const iterations = adapted.memory!.iterations;

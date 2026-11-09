@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adaptBudget, chooseBudget, maxIterations, rememberUse } from '../src/render/budget.ts';
+import { FINAL_RAISE_FRACTION, adaptBudget, chooseBudget, maxIterations, rememberUse } from '../src/render/budget.ts';
 import { iterationBudget } from '../src/fractal/index.ts';
 
 test('a view whose coarse samples run out of iterations raises its budget', () => {
@@ -12,6 +12,22 @@ test('a view whose coarse samples run out of iterations raises its budget', () =
   assert.equal(chooseBudget(first.memory, -60), formula * 4);
   // Resolved enough: keep the budget, no re-render.
   assert.deepEqual(adaptBudget(first.memory, -60, formula * 4, 49152, 100), { memory: first.memory, raise: false });
+});
+
+test('final pixels left unresolved raise the budget from a much smaller share than coarse samples', () => {
+  // The seahorse-valley view that stayed at 2560 with 1571 of 164480 pixels (0.96%) black, all escaping by 10240.
+  const formula = iterationBudget(-40);
+  assert.equal(adaptBudget(undefined, -40, formula, 164480, 1571).raise, false, 'as a coarse share, below 1%');
+  const final = adaptBudget(undefined, -40, formula, 164480, 1571, FINAL_RAISE_FRACTION);
+  assert.equal(final.raise, true);
+  assert.equal(final.memory.iterations, formula * 4);
+  assert.equal(adaptBudget(undefined, -40, formula, 256000, 228, FINAL_RAISE_FRACTION).raise, true, '0.09% still raises');
+  assert.equal(adaptBudget(undefined, -40, formula, 164480, 12, FINAL_RAISE_FRACTION).raise, false, 'a dozen pixels: not worth it');
+  // The other limits still hold: the cap, and a share that stops falling far above the formula.
+  assert.equal(adaptBudget(undefined, -40, maxIterations(-40), 164480, 1571, FINAL_RAISE_FRACTION).raise, false);
+  const stalled = adaptBudget({ iterations: formula * 16, logScale: -40, previousFraction: 0.01 }, -40, formula * 16, 164480, 1571, FINAL_RAISE_FRACTION);
+  assert.equal(stalled.raise, false);
+  assert.equal(stalled.memory.saturatedAt, -40);
 });
 
 test('raises stop when they no longer help, at the cap, and resume deeper', () => {
