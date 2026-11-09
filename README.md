@@ -336,7 +336,7 @@ npm run preview
   - 在每像素约 2^-37 的深度，Worker 原来用普通双精度直接迭代。迭代次数多时会偏差 0.004–0.2 次，上面那个视图约 3% 的像素颜色因此不同；抽查的 24 个像素中，GPU 的结果有 23 个与 BigInt 一致，Worker 的一个也没有。现在 Worker 从 2^-24 起就用扰动（见迭代路径）。
   - 海马谷视图里，有 122 个像素 BigInt 在 2300–2540 次逃逸，Worker（带 BLA 的扰动）到预算 2560 仍未定；GPU 没有 BLA，算对了 18 个抽查像素中的 17 个。BLA 的阈值已从 2^-36 收紧到 2^-40（见 BLA 一节）。
   - 这两点都是纯 CPU 渲染本身的精度问题，已经改进。
-- Node 里没有 WebGPU，单元测试只用一个假设备检查分批调度（例如最后一批之后视图已变，计算会报告已停止），覆盖不到着色器本身；以上数据来自无界面 Chrome 中的端到端脚本。
+- Node 里没有 WebGPU，单元测试只用一个假设备检查分批调度（例如最后一批之后视图已变，计算会报告已停止），覆盖不到着色器本身。着色器在真实 GPU 上的检查见“测试”一节的 `npm run test:gpu`；以上数据来自无界面 Chrome 中的端到端脚本。
 - 只服务到 2^-90：f32 的指数在 2^-126 以下就不够了。更深的视图需要给数值加独立指数，并在 GPU 上实现 BLA。
 - 着色器编译会在页面打开时让主线程停顿一次（这台机器在高负载下约 0.45 s）。
 
@@ -473,7 +473,7 @@ src/
     palette-menu.ts      配色菜单（点击、悬停与键盘操作）
     gestures.ts          滚轮与指针手势
 tests/                   node:test 测试，文件名对应被测模块（input.test.mjs 用模拟 DOM 测试 main.ts）
-scripts/                 性能基准与图标生成
+scripts/                 性能基准、真实 GPU 检查（gpu-check.mjs）与图标生成
 ```
 
 算法主要参考 Claude Heiland-Allen 的 [Deep Zoom](https://mathr.co.uk/web/deep-zoom.html) 与 [Deep zoom theory and practice](https://mathr.co.uk/blog/2021-05-14_deep_zoom_theory_and_practice.html)。
@@ -499,6 +499,21 @@ npm run build
 - 距离估计与高精度导数一致；迭代预算的提高、停止与遗忘符合预期。
 
 这些测试验证的是选定的测试点，并不构成对所有深度和边界的数学证明。
+
+**真实 GPU**：Node 里没有 WebGPU，`npm test` 不会执行着色器。下面的命令会启动自己的 Vite 服务器，用无界面 Chrome 在本机 GPU 上实际渲染，每项检查用一个新的浏览器上下文：
+
+```sh
+npm run test:gpu                         # 约 12 秒
+CHROME=/path/to/chrome npm run test:gpu  # 指定 Chrome
+```
+
+- GPU 通过启动自检，并实际用于渲染。
+- 在 GPU 与只用 Worker（`?cpu`）预算相同的 4 个视图上逐像素比较，颜色明显不同的像素不超过 1%（细丝中的混沌像素）。其中一个视图要求不超过 0.1%，实际为 0。
+  - 本机实测为 0–0.21%。
+  - 把着色器里虚部的符号改反（自检只用实轴上的点，查不出），4 个视图都有 82–99% 的像素不同，检查失败。
+- 没有 WebGPU、误差项被编译器化简（模拟）、渲染中途设备丢失时，画面都由 Worker 完整画出。
+
+它只检查本机的 GPU 和浏览器。其他平台（Windows、Safari、手机）要在那里打开页面，与加 `?cpu` 的结果对比；画布的 `data-gpu` 为 `true` 表示用了 GPU，自检不通过时控制台会有警告。
 
 ## 性能基准
 
