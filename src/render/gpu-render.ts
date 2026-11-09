@@ -216,7 +216,12 @@ export interface GpuPass {
 /** Main-thread work between turns given back to the page. */
 const YIELD_MS = 8;
 /** A turn of the event loop (a message, not setTimeout: background pages clamp timers to about a second). */
-export const yieldToEvents = () => new Promise(resolve => { const channel = new MessageChannel(); channel.port1.onmessage = resolve; channel.port2.postMessage(0); });
+export const yieldToEvents = () => new Promise<void>(resolve => {
+  const { port1, port2 } = new MessageChannel();
+  // Closed once used: an open port keeps a Node process (the tests) alive.
+  port1.onmessage = () => { port1.close(); resolve(); };
+  port2.postMessage(0);
+});
 
 /** f32 pair (hi, lo) of a double. */
 const split = (value: number, out: Float32Array, at: number) => { out[at] = value; out[at + 1] = value - out[at]; };
@@ -389,7 +394,8 @@ export class GpuJob {
         done.uniform.destroy();
       }
       this.batchTiles.set(step, batch);
-      return !stopped;
+      // Checked again: the page had a turn after the last batch, and a newer render may have started then.
+      return !stopped && current() && !this.lost();
     } finally {
       tileBuffer.destroy();
     }

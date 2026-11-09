@@ -384,7 +384,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // 3, 4. The workers' share, and raises as their results call for.
     let fresh = 0;
     for (let i = 0; i < pixels; i++) fresh += 1 - reused[i];
+    // A stale render must neither send the workers requests (each one makes a worker drop what it
+    // is doing for its id) nor mark the view finished: checked before both.
     for (let list = leftIn(tiles); list.length;) {
+      if (!current()) return;
       cpuPixels += list.length;
       canvas.dataset.cpuPixels = String(cpuPixels);
       const unresolved = await onCpu(list);
@@ -408,6 +411,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (!await run(iterations, 1, rerun, again, stageFine)) return failed();
       list = leftIn(rerun);
     }
+    if (!current()) return;
     target.iterations = iterations;
     canvas.dataset.gpuMs = String(Math.round(performance.now() - started));
     canvas.dataset.gpuRuns = String(runs);
