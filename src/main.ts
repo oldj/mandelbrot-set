@@ -122,8 +122,9 @@ function keepSamples(tile: TileData, regions: RenderRegion[]): void {
 }
 
 /**
- * GPU rendering, only with `?gpu` in the page URL (see render/gpu-render.ts),
- * in tiles from the centre out, staged batch by batch as they are read back:
+ * GPU rendering, wherever WebGPU gives a GPU that passes the self-test, unless
+ * the page URL has `?cpu` (see render/gpu-render.ts), in tiles from the centre
+ * out, staged batch by batch as they are read back:
  *
  * 1. A coarse pass (every 4th pixel each way), painted as the workers' coarse
  *    tiles are. As the workers' coarse pass does for cheap unresolved samples,
@@ -143,12 +144,16 @@ function keepSamples(tile: TileData, regions: RenderRegion[]): void {
  *
  * The orbit is the workers' shared one (worker 0 builds it, off the main
  * thread), so the workers need none of their own afterwards; shallow views,
- * which have none, get one at the view centre here. Without WebGPU, or below
- * MIN_LOG_SCALE, renders are the workers' alone, as before.
+ * which have none, get one at the view centre here. Without a usable GPU,
+ * after it fails (from then on), or below MIN_LOG_SCALE, renders are the
+ * workers' alone.
  */
 let gpu: GpuRenderer | undefined;
-/** Renders wait (at most 2 s) for the GPU while it starts, rather than start on the workers and be thrown away. */
-let gpuStarting = new URLSearchParams(location.search).has('gpu');
+/**
+ * Renders wait (at most 2 s) for the GPU while it starts, rather than start on the workers and be thrown
+ * away. Browsers without WebGPU start on the workers at once. (`?gpu`, once needed, is still accepted.)
+ */
+let gpuStarting = !new URLSearchParams(location.search).has('cpu') && !!navigator.gpu;
 if (gpuStarting) {
   const ready = (renderer?: GpuRenderer) => {
     if (!gpuStarting) return;

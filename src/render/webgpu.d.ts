@@ -32,6 +32,7 @@ interface GPUQueue {
 interface GPUDevice {
   readonly queue: GPUQueue;
   readonly lost: Promise<unknown>;
+  destroy(): void;
   createShaderModule(descriptor: { code: string }): GPUShaderModule;
   createComputePipelineAsync(descriptor: { layout: 'auto'; compute: { module: GPUShaderModule; entryPoint: string } }): Promise<GPUComputePipeline>;
   createBuffer(descriptor: { size: number; usage: number }): GPUBuffer;
@@ -42,6 +43,9 @@ interface GPUDevice {
 interface GPUUncapturedErrorEvent extends Event { readonly error: { readonly message: string } }
 interface GPUAdapter {
   readonly limits: { readonly maxStorageBufferBindingSize: number; readonly maxBufferSize: number };
+  /** A software implementation (newer browsers: info; older: on the adapter). */
+  readonly info?: { readonly isFallbackAdapter?: boolean };
+  readonly isFallbackAdapter?: boolean;
   requestDevice(descriptor?: { requiredLimits?: Record<string, number> }): Promise<GPUDevice>;
 }
 interface GPU { requestAdapter(options?: { powerPreference?: 'low-power' | 'high-performance' }): Promise<GPUAdapter | null> }

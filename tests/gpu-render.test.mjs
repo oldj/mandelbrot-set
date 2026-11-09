@@ -54,3 +54,27 @@ test('a GPU pass whose view changes while the page has its turn after the last b
     assert.equal(ok, false);
   }
 });
+
+test('the GPU self-test accepts exact counts and rejects what a compiler folding the error terms computes', async () => {
+  const { probeCounts, probePasses } = await import('../src/render/gpu-render.ts');
+  const pairs = counts => counts.flatMap(count => [count, -1]);
+  const exact = probeCounts();
+  assert.ok(exact.every(count => count > 10000 && count < 18000), 'every probe point escapes, late');
+  assert.equal(probePasses(pairs(exact)), true);
+  assert.equal(probePasses(pairs(exact.map(count => count + 0.5))), true, 'within an iteration');
+  // The same points with c kept to f32 (error terms folded to 0, so add() loses c's low bits), and
+  // with every operation in f32 too: no count survives either.
+  const exactly = x => x, f32 = x => Math.fround(x);
+  const iterate = (roundC, roundOps) => exact.map((_, k) => {
+    const c = roundC(0.25 + 16 * 2 ** -28 + (k - 7.5) * 2 ** -28);
+    let z = 0;
+    for (let n = 1; n <= 40000; n++) {
+      z = roundOps(roundOps(z * z) + c);
+      if (z * z > 256) return n + 1 - Math.log2(0.5 * Math.log2(z * z));
+    }
+    return -2;
+  });
+  assert.equal(probePasses(pairs(iterate(f32, exactly))), false, 'c without its low bits');
+  assert.equal(probePasses(pairs(iterate(f32, f32))), false, 'f32 arithmetic');
+  assert.equal(probePasses(new Float32Array(32)), false, 'zeros (a failed dispatch)');
+});

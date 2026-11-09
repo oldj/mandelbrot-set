@@ -1,5 +1,6 @@
 /**
- * Rendering on the GPU (WebGPU), when the page URL has `?gpu`: the view in
+ * Rendering on the GPU (WebGPU), wherever the browser has a GPU that passes
+ * the self-test (see probeCounts) and the page URL has no `?cpu`: the view in
  * double-single precision, tile by tile from the centre out, with the
  * workers computing exactly only the pixels it cannot settle (see main.ts).
  *
@@ -226,6 +227,37 @@ export const yieldToEvents = () => new Promise<void>(resolve => {
 /** f32 pair (hi, lo) of a double. */
 const split = (value: number, out: Float32Array, at: number) => { out[at] = value; out[at + 1] = value - out[at]; };
 
+/**
+ * The self-test a GPU must pass before it renders: the kernel on PROBE_WIDTH
+ * points c = 1/4 + (k + 8.5) 2^-28 on the real axis, just beyond the cusp,
+ * around the reference c = 0 (whose orbit stays 0, so it iterates z itself).
+ * They escape after 10-18 thousand steps, and only at the right step if every
+ * error term survives: f32 alone holds neither c's low bits nor z's slow drift
+ * past 1/2. A shader compiler that folds the error terms (as Metal's did,
+ * written plainly) gets them wrong by thousands of steps or never escapes.
+ */
+const PROBE_WIDTH = 16, PROBE_LOG_SCALE = -28, PROBE_LIMIT = 40000;
+/** The probe's centre: c of its pixel k is PROBE_CENTRE + (k - 7.5) 2^PROBE_LOG_SCALE. */
+const PROBE_CENTRE = 0.25 + 16 * 2 ** PROBE_LOG_SCALE;
+
+/** The probe's smooth counts, in doubles, as the kernel computes them. */
+export function probeCounts(): number[] {
+  return Array.from({ length: PROBE_WIDTH }, (_, k) => {
+    const c = PROBE_CENTRE + (k - (PROBE_WIDTH - 1) / 2) * 2 ** PROBE_LOG_SCALE;
+    let z = 0;
+    for (let n = 1; n <= PROBE_LIMIT; n++) {
+      z = z * z + c;
+      if (z * z > 256) return n + 1 - Math.log2(0.5 * Math.log2(z * z));
+    }
+    return UNRESOLVED;
+  });
+}
+
+/** Whether the probe's results (count, distance pairs, its pixels first) are right, to an iteration. */
+export function probePasses(values: ArrayLike<number>): boolean {
+  return probeCounts().every((count, k) => Math.abs(values[2 * k] - count) <= 1);
+}
+
 export class GpuRenderer {
   private readonly device: GPUDevice;
   private readonly pipeline: GPUComputePipeline;
@@ -242,20 +274,46 @@ export class GpuRenderer {
     });
   }
 
-  /** A renderer on this browser's GPU, or undefined without WebGPU. */
+  /**
+   * A renderer on this browser's GPU, or undefined (the workers render) without WebGPU, on a
+   * software adapter, or when the GPU fails the self-test or any step of starting.
+   */
   static async create(): Promise<GpuRenderer | undefined> {
     try {
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) return undefined;
+      // A software implementation (no usable GPU) would be slower than the workers.
+      if (adapter.info?.isFallbackAdapter || adapter.isFallbackAdapter) return undefined;
       // Large canvases need more than WebGPU's default 128 MiB bindings (the mask is a byte a pixel).
       const device = await adapter.requestDevice({ requiredLimits: {
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
       const module = device.createShaderModule({ code: SHADER });
       const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-      return new GpuRenderer(device, pipeline);
+      const renderer = new GpuRenderer(device, pipeline);
+      if (!await renderer.selfTest()) {
+        console.warn('GPU rendering unavailable: the GPU failed its precision self-test; rendering on the workers.');
+        device.destroy();
+        return undefined;
+      }
+      return renderer;
     } catch (error) {
       console.warn('GPU rendering unavailable:', error);
       return undefined;
+    }
+  }
+
+  /** Run the probe (see probeCounts) through the real kernel, buffers and readback. */
+  private async selfTest(): Promise<boolean> {
+    const job = this.job({ view: { logScale: PROBE_LOG_SCALE } as View, width: PROBE_WIDTH, height: 1,
+      cssWidth: PROBE_WIDTH, cssHeight: 1, current: () => true });
+    try {
+      const zeros = new Float64Array(2);
+      job.setOrbit({ re: zeros, im: zeros, exp: zeros }, PROBE_CENTRE, 0);
+      let values: Float32Array | undefined;
+      const ok = await job.pass({ iterations: PROBE_LIMIT, step: 1, tiles: [[0, 0]], onBatch: batch => { values = batch.values; } });
+      return ok && !this.lost && !!values && probePasses(values);
+    } finally {
+      job.dispose();
     }
   }
 
