@@ -295,22 +295,32 @@ test('every tile carries its samples\' counts and distances, from which its pale
     assert.ok(check(deepened.tiles) > 0);
   }
   // Switched after the coarse pass: later tiles (inherited samples too) are in the new palette, and so is a later deepening.
+  // The worker holds at its first yield after the coarse pass (see the host) while the switch is sent,
+  // so it lands mid-render however late this thread gets to it (it used to race the render under load).
+  // Four times the pixels: the yield comes well before the final pass on any machine.
+  const wide = { ...base, width: width * 2, height: height * 2 };
   const tiles = [];
   const done = new Promise(resolve => {
     const receive = message => {
       if (message.id !== 5) return;
       if (message.type === 'tiles') tiles.push(...message.tiles);
-      if (message.type === 'pass' && message.step === 8) worker.postMessage({ type: 'palette', id: 5, palette: 'vivid' });
+      if (message.type === 'pass' && message.step === 8) {
+        worker.postMessage({ type: 'palette', id: 5, palette: 'vivid' });
+        worker.postMessage({ type: 'test-release' });
+      }
       if (message.type === 'pass' && message.step === 1) { worker.off('message', receive); resolve(); }
     };
     worker.on('message', receive);
   });
-  worker.postMessage({ ...base, id: 5, iterations: 2560, palette: 'classic' });
+  worker.postMessage({ type: 'test-hold', step: 8 });
+  worker.postMessage({ ...wide, id: 5, iterations: 2560, palette: 'classic' });
   await done;
   check(tiles);
-  assert.ok(tiles.some(tile => tile.palette === 'classic'), 'the coarse pass was classic');
+  const switched = tiles.findIndex(tile => tile.palette === 'vivid');
+  assert.ok(switched > 0, 'the coarse pass was classic, and the switch took effect');
+  assert.ok(tiles.slice(switched).every(tile => tile.palette === 'vivid'), 'every tile after the switch is vivid');
   assert.ok(tiles.filter(tile => tile.step === 1).every(tile => tile.palette === 'vivid'), 'the final pass is vivid');
-  const deepened = await run(worker, { ...base, id: 5, iterations: 10240, palette: 'classic', deepen: true });
+  const deepened = await run(worker, { ...wide, id: 5, iterations: 10240, palette: 'classic', deepen: true });
   assert.ok(deepened.tiles.length && deepened.tiles.every(tile => tile.palette === 'vivid'));
   check(deepened.tiles);
 });
