@@ -79,3 +79,41 @@ test('the GPU self-test accepts exact counts and rejects what a compiler folding
   assert.equal(probePasses(pairs(iterate(f32, f32))), false, 'f32 arithmetic');
   assert.equal(probePasses(new Float32Array(32)), false, 'zeros (a failed dispatch)');
 });
+
+test('a list pass computes every listed pixel once, in order, 64 to a workgroup', async () => {
+  // More than one batch (at most 65536 pixels each), and not a whole number of workgroups.
+  const size = 2 * GPU_TILE, count = 70000, params = [], dispatches = [];
+  const device = fakeDevice();
+  device.queue.writeBuffer = (buffer, offset, data) => { if (data.byteLength === 80) params.push(new Uint32Array(data.slice(0))); };
+  const computePass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups: (...shape) => dispatches.push(shape), end() {} };
+  device.createCommandEncoder = () => ({ beginComputePass: () => computePass, copyBufferToBuffer() {}, finish: () => ({}) });
+  const target = { view: { logScale: -8 }, width: size, height: size, cssWidth: size, cssHeight: size, current: () => true };
+  const pipeline = { getBindGroupLayout: () => ({}) };
+  const gpu = new GpuJob(device, { plain: pipeline, early: pipeline }, target, () => false);
+  gpu.setOrbit({ re: [0, 0], im: [0, 0], exp: [0, 0] }, 0, 0);
+  const list = Uint32Array.from({ length: count }, (_, k) => k % (size * size));
+  const seen = [];
+  const ok = await gpu.pass({ iterations: 64, step: 1, tiles: [], list, onBatch: ({ first, count, side, values }) => {
+    assert.equal(side, 0);
+    assert.equal(values.length, 2 * count);
+    seen.push([first, count]);
+  } });
+  assert.equal(ok, true);
+  let next = 0;
+  for (const [first, length] of seen) { assert.equal(first, next); next += length; }
+  assert.equal(next, count);
+  // Step 0 and side 8 mark a list for the kernel; it is told the list's length; workgroups of 64.
+  for (const words of params) { assert.equal(words[12], 0); assert.equal(words[13], 8); assert.equal(words[18], count); }
+  assert.equal(dispatches.reduce((sum, [x, y, z]) => sum + x * y * z, 0), Math.ceil(count / 64));
+});
+
+test('a masked pass fills its batches with the samples to compute, not whole tiles', async () => {
+  // One pixel to compute in each of four tiles: one batch (a tile's worth of samples), not four.
+  const state = { current: true, lost: false }, { job: gpu, tiles } = job(state), size = 2 * GPU_TILE;
+  const mask = new Uint8Array(size * size);
+  for (const [x, y] of tiles) mask[(y + 5) * size + x + 7] = 1;
+  const batches = [];
+  const ok = await gpu.pass({ iterations: 64, step: 1, tiles, mask, onBatch: ({ first, count }) => batches.push([first, count]) });
+  assert.equal(ok, true);
+  assert.deepEqual(batches, [[0, tiles.length]]);
+});

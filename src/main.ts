@@ -264,6 +264,8 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
   // Final pixels (escaped, or proved) at quality 1; those left to the workers black at quality 2.
   // The pixels left to the workers, row by row per tile as each tile is staged, until sent (see cpuRound).
   let left: Uint32Array[] = [], lefts = 0;
+  // While a fine pass runs at a capped budget (see DEFER_SHARE): its unsettled pixels, for a list pass at the full one.
+  let deferred: number[] | undefined;
   const stageFine = ([x, y]: readonly [number, number]) => {
     const w = Math.min(T, width - x), h = Math.min(T, height - y), colour = shade();
     const words = new Uint32Array(w * h), levels = new Uint8Array(w * h), claims = new Uint8Array(w * h);
@@ -275,7 +277,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       levels[k] = level(i);
       words[k] = colour(count >= 0 ? count : -1, decodeDistance(levels[k]));
       claims[k] = count >= 0 || count === PROVEN ? 1 : 2;
-      if (claims[k] === 2) tileLeft[tileLefts++] = i;
+      if (claims[k] === 2) {
+        if (deferred && isUnsettled(count)) deferred.push(i);
+        else tileLeft[tileLefts++] = i;
+      }
     }
     if (tileLefts) { left.push(tileLeft.slice(0, tileLefts)); lefts += tileLefts; }
     const painted = stage!.addBlock(x, y, w, h, words, claims, quality);
@@ -285,6 +290,15 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (painted[k]) { samples.counts[i] = counts[i] >= 0 ? counts[i] : -1; samples.distances[i] = levels[k]; }
     }
   };
+  const store = (index: number, value: number, distance: number) => {
+    const was = counts[index];
+    if (Number.isNaN(was)) computed++;
+    else if (isUnsettled(was)) unsettled--;
+    if (isUnsettled(value)) unsettled++;
+    counts[index] = value; distances[index] = distance;
+  };
+  // The workers start on what the GPU left while it goes on.
+  const sendLeft = () => { if (open && lefts >= LEFT_CHUNK * activeWorkerCount) open.send(takeLeft()); };
   // Run a pass, storing its samples and staging each tile as its batch arrives.
   const run = async (iterations: number, step: number, list: readonly (readonly [number, number])[], mask: Uint8Array | undefined,
     stageTile: (tile: readonly [number, number]) => void, early = false) => job.pass({ iterations, step, tiles: list, mask, early, onBatch: ({ first, count, side, values }) => {
@@ -293,18 +307,52 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
         const x = x0 + i * step, y = y0 + j * step, index = y * width + x;
         if (x >= width || y >= height || (mask && !mask[index])) continue;
-        const at = 2 * ((t * side + j) * side + i), was = counts[index], value = values[at];
-        if (Number.isNaN(was)) computed++;
-        else if (isUnsettled(was)) unsettled--;
-        if (isUnsettled(value)) unsettled++;
-        counts[index] = value; distances[index] = values[at + 1];
+        const at = 2 * ((t * side + j) * side + i);
+        store(index, values[at], values[at + 1]);
       }
       stageTile(list[first + t]);
     }
-    // The workers start on what the GPU left while it goes on.
-    if (open && lefts >= LEFT_CHUNK * activeWorkerCount) open.send(takeLeft());
+    sendLeft();
     scheduleDraw();
   } });
+  // Run a list pass (see GpuPass.list) over these pixels, staging each batch's with stagePixels.
+  const runList = (iterations: number, pixels: Uint32Array, early: boolean, stagePixels: (indices: Uint32Array) => void) =>
+    job.pass({ iterations, step: 0, tiles: [], list: pixels, early, onBatch: ({ first, count, values }) => {
+      for (let k = 0; k < count; k++) store(pixels[first + k], values[2 * k], values[2 * k + 1]);
+      stagePixels(pixels.subarray(first, first + count));
+      sendLeft();
+      scheduleDraw();
+    } });
+  // The pixels (by tile, nearest the centre first) that pass a test, every step-th of each tile.
+  const collect = (step: number, test: (index: number) => boolean) => {
+    const found: number[] = [];
+    for (const [x0, y0] of tiles) for (let y = y0; y < Math.min(height, y0 + T); y += step) for (let x = x0; x < Math.min(width, x0 + T); x += step) {
+      if (test(y * width + x)) found.push(y * width + x);
+    }
+    return Uint32Array.from(found);
+  };
+  // Coarse samples from a list pass: their tiles staged again.
+  const stageCoarseOf = (indices: Uint32Array) => {
+    const seen = new Set<number>();
+    for (const index of indices) {
+      const x = index % width, y = (index - x) / width, tx = x - x % T, ty = y - y % T, key = ty * width + tx;
+      if (!seen.has(key)) { seen.add(key); stageCoarse([tx, ty]); }
+    }
+  };
+  // Pixels from a list pass: escaped ones final, the rest for the workers.
+  const stageList = (indices: Uint32Array) => {
+    const colour = shade(), done: number[] = [], words: number[] = [], rest: number[] = [];
+    samples ??= { counts: new Float32Array(pixels).fill(NaN), distances: new Uint8Array(pixels) };
+    for (const index of indices) {
+      const count = counts[index];
+      if (count < 0) { rest.push(index); continue; }
+      const distance = level(index);
+      done.push(index); words.push(colour(count, decodeDistance(distance)));
+      samples.counts[index] = count; samples.distances[index] = distance;
+    }
+    if (done.length) stage!.addPixels(Uint32Array.from(done), Uint32Array.from(words), quality);
+    if (rest.length) { left.push(Uint32Array.from(rest)); lefts += rest.length; }
+  };
   const takeLeft = () => {
     const all = new Uint32Array(lefts);
     let at = 0;
@@ -418,14 +466,14 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
         target.iterations = iterations;
         canvas.dataset.iterations = String(iterations);
         if (!await gpuOrbit(job, id, target, iterations)) return failed();
-        const mask = new Uint8Array(pixels);
-        for (let i = 0; i < pixels; i++) if (isUnsettled(counts[i])) mask[i] = 1;
+        // A list: the samples left are sparse, and each of them runs long.
+        const again = collect(4, i => isUnsettled(counts[i]));
         runs++;
-        if (!await run(iterations, 4, tiles.filter(tile => within(mask, tile, 4)), mask, stageCoarse, early)) return failed();
+        if (!await runList(iterations, again, early, stageCoarseOf)) return failed();
         if (early) {
-          let ran = 0, inside = 0;
-          for (let i = 0; i < pixels; i++) if (mask[i]) { ran++; if (counts[i] === INSIDE) inside++; }
-          early = inside > EARLY_SHARE * ran;
+          let inside = 0;
+          for (const i of again) if (counts[i] === INSIDE) inside++;
+          early = inside > EARLY_SHARE * again.length;
         }
       }
     }
@@ -448,13 +496,32 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       }
       // The early interior test where enough coarse samples stayed bounded (after a pan: as the last whole render did).
       gpuEarly = bounded > EARLY_SHARE * computed;
+      // The fine pass's cap (see DEFER_SHARE): what all but the slowest coarse samples took, escaped or not.
+      gpuCap = 1;
+      if (iterations >= DEFER_FROM) {
+        const steps = new Float32Array(computed);
+        let at = 0;
+        for (let i = 0; i < pixels; i++) if (!Number.isNaN(counts[i])) steps[at++] = counts[i] >= 0 ? counts[i] : distances[i];
+        steps.sort();
+        const cap = Math.max(steps[Math.floor((1 - DEFER_SHARE) * (at - 1))] ?? iterations, iterations / 8);
+        if (cap <= iterations / 2) gpuCap = cap / iterations;
+      }
       expected = Math.ceil(fresh * left / Math.max(1, computed));
     }
     open = cpuRound(expected);
     // Every tile of a whole render is staged here, even one with only coarse samples left (the 1x1 corner
     // tile when both sides are 64n + 1): staging makes its samples final or leaves them to the workers.
     // After a pan only the tiles with pixels to compute (there was no coarse pass).
-    if (!await run(iterations, 1, pan ? tiles.filter(tile => within(mask, tile, 1)) : tiles, mask, stageFine, gpuEarly)) return failed();
+    // At a large budget, a capped one first (see DEFER_SHARE), then the pixels it left unsettled as a list.
+    const capped = Math.ceil(iterations * gpuCap);
+    deferred = capped < iterations ? [] : undefined;
+    if (!await run(capped, 1, pan ? tiles.filter(tile => within(mask, tile, 1)) : tiles, mask, stageFine, gpuEarly)) return failed();
+    const rest = deferred && Uint32Array.from(deferred);
+    deferred = undefined;
+    if (rest?.length) {
+      runs++;
+      if (!await runList(iterations, rest, gpuEarly, stageList)) return failed();
+    }
     canvas.dataset.gpuFirstMs ??= String(Math.round(performance.now() - started));
     coarseReady = true;
     completedStep = 1;
@@ -477,12 +544,9 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       iterations = adapted.memory!.iterations;
       canvas.dataset.iterations = String(iterations);
       if (!await gpuOrbit(job, id, target, iterations)) return failed();
-      const again = new Uint8Array(pixels);
-      for (const i of unresolved) again[i] = 1;
-      const rerun = tiles.filter(tile => within(again, tile, 1));
       runs++;
       open = cpuRound(unresolved.length);
-      if (!await run(iterations, 1, rerun, again, stageFine, true)) return failed();
+      if (!await runList(iterations, Uint32Array.from(unresolved), true, stageList)) return failed();
     }
     if (!current()) return;
     target.iterations = iterations;
@@ -751,6 +815,18 @@ const LEFT_CHUNK = 1024;
  * share of its coarse samples stayed bounded (see GpuPass.early).
  */
 const EARLY_SHARE = 0.01;
+/**
+ * From a budget of DEFER_FROM on, the fine pass runs capped at the steps all but DEFER_SHARE of the
+ * coarse samples took, or an eighth of the budget if more (and not at all above half of it), and the
+ * pixels it leaves unsettled run at the full budget as a list (see GpuPass.list). Among their tiles,
+ * the few that run the whole budget held a SIMD group each for one busy lane: in seahorse valley at
+ * 1e7, 0.9% of the pixels took 42% of the pass's iterations and most of its time. An eighth alone
+ * deferred 89% of a filament view whose pixels escape after 4-8 thousand steps; a lower cap than an
+ * eighth mixed more pixels that escape soon after it into the list, which ran slower for it.
+ */
+const DEFER_SHARE = 0.1, DEFER_FROM = 32768;
+/** The last whole render's fine-pass cap, as a share of its budget (after a pan, used again). */
+let gpuCap = 1;
 /** Whether the last whole GPU render's fine pass did: a pan's does as well. */
 let gpuEarly = false;
 let lastChange = -Infinity;
