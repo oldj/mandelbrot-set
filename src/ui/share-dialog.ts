@@ -56,8 +56,24 @@ export function createShareDialog(link: () => string | undefined): ShareDialog {
   closeButton.addEventListener('click', () => dialog.close());
   closeOnBackdrop(dialog);
 
-  // A click in a link selects all of it, ready to copy by hand.
-  for (const input of [shortInput, fullInput]) input.addEventListener('focus', () => input.select());
+  // Clicking into a link selects all of it, ready to copy by hand; a click in a field already focused
+  // places the caret as usual, so part of it can still be selected. WebKit collapses a selection made
+  // on focus at the mouseup that follows, hence selecting again there.
+  for (const input of [shortInput, fullInput]) {
+    const selectAll = () => input.setSelectionRange(0, input.value.length);
+    let focusing = false;
+    input.addEventListener('pointerdown', () => { focusing = document.activeElement !== input; });
+    input.addEventListener('focus', selectAll);
+    input.addEventListener('mouseup', event => {
+      if (!focusing) return;
+      focusing = false;
+      event.preventDefault();
+      selectAll();
+    });
+  }
+  // A rotated phone or resized window changes how many lines the full link takes.
+  const refit = () => { if (dialog.open) fitHeight(fullInput); };
+  window.addEventListener('resize', refit);
 
   const copyShortButton = copyOnClick(copyShort, feedback, () => short, 'Short link copied',
     'Couldn’t copy. Select the short link and copy it instead.');
@@ -70,6 +86,6 @@ export function createShareDialog(link: () => string | undefined): ShareDialog {
 
   return {
     get open() { return dialog.open; },
-    dispose() { copyShortButton.dispose(); copyFullButton.dispose(); },
+    dispose() { copyShortButton.dispose(); copyFullButton.dispose(); window.removeEventListener('resize', refit); },
   };
 }

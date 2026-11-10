@@ -40,18 +40,22 @@ export interface CopyButton {
 /**
  * Copy `text()` to the clipboard when `button` is clicked, showing progress on
  * the button (data-state: pending, copied, error, idle) and in `feedback`, a
- * live region, until it resets after 2 s (4 s for errors). Nothing happens
+ * live region (its data-state too), until it resets after 2 s (4 s for errors). Nothing happens
  * while `text()` is undefined.
  */
 export function copyOnClick(button: HTMLButtonElement, feedback: HTMLElement, text: () => string | undefined,
   copied: string, failed: string): CopyButton {
   let timer: ReturnType<typeof setTimeout>;
   let said = '';
-  const say = (message: string) => { feedback.textContent = said = message; };
+  /** The message and its state (pending, copied, error) on the feedback line, which CSS colours by state. */
+  const say = (message: string, state: string) => {
+    feedback.textContent = said = message;
+    feedback.dataset.state = state;
+  };
   const reset = () => {
     clearTimeout(timer);
     // Two buttons may share one feedback line: leave it if the other has spoken since.
-    if (feedback.textContent === said) feedback.textContent = '';
+    if (feedback.textContent === said) { feedback.textContent = ''; feedback.dataset.state = 'idle'; }
     button.dataset.state = 'idle';
   };
   button.addEventListener('click', async () => {
@@ -60,15 +64,15 @@ export function copyOnClick(button: HTMLButtonElement, feedback: HTMLElement, te
     clearTimeout(timer);
     button.disabled = true;
     button.dataset.state = 'pending';
-    say('Copying…');
+    say('Copying…', 'pending');
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(value);
       button.dataset.state = 'copied';
-      say(copied);
+      say(copied, 'copied');
     } catch {
       button.dataset.state = 'error';
-      say(failed);
+      say(failed, 'error');
     } finally {
       button.disabled = false;
       timer = setTimeout(reset, button.dataset.state === 'copied' ? 2000 : 4000);

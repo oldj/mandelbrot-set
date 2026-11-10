@@ -889,11 +889,15 @@ function writeHash(): void {
   const url = location.pathname + location.search + (hash ? `#${hash}` : '');
   if (url !== location.pathname + location.search + location.hash) history.replaceState(history.state, '', url);
 }
-/** The full address of the view as shown now, for sharing (the hash is otherwise written a moment after a change). */
+/**
+ * The address of the view as shown now, for sharing (the hash is otherwise written a moment after a
+ * change). The query is left out: it holds only local switches such as ?cpu, which would force the
+ * recipient's rendering mode, or tracking parameters the page arrived with.
+ */
 function shareLink(): string | undefined {
   if (!view) return undefined;
   writeHash();
-  return location.origin + location.pathname + location.search + location.hash;
+  return location.origin + location.pathname + location.hash;
 }
 function scheduleHash(): void {
   clearTimeout(hashTimer);

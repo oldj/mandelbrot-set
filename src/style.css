@@ -507,7 +507,7 @@ textarea.view-input {
 .dialog-copy[data-state="copied"] .copy-icon { display: none; }
 .dialog-copy[data-state="copied"] .copy-check { display: block; }
 .view-copy-feedback { flex: 1; min-width: 0; color: var(--text-muted); }
-.dialog-copy[data-state="copied"] + .view-copy-feedback { color: #a4e8ca; }
+.view-copy-feedback[data-state="copied"] { color: #a4e8ca; }
 .dialog-apply {
   margin-left: auto;
   min-width: 76px;
@@ -545,6 +545,12 @@ textarea.view-input {
 }
 
 @media (max-width: 480px) {
+  /* The copy status gets a line of its own under the buttons, rather than a sliver between them. */
+  .view-dialog-actions { flex-wrap: wrap; row-gap: 8px; }
+  .view-copy-feedback { order: 1; flex-basis: 100%; }
+  .view-copy-feedback:empty { display: none; }
+  /* The share dialog's two copy buttons share the row, and stack where they don't fit side by side. */
+  .share-dialog .dialog-copy { flex: 1 1 auto; }
   :root {
     --hud-left: max(12px, env(safe-area-inset-left));
     --hud-right: max(12px, env(safe-area-inset-right));

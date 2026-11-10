@@ -100,4 +100,12 @@ test('a request that hangs is abandoned after the timeout', async () => {
   f.advance(SHORTEN_TIMEOUT_MS);
   assert.deepEqual(await pending, { ok: false, reason: 'unavailable' });
   assert.equal(signal.aborted, true);
+  // Also without AbortController, and when the answer starts but its body never arrives.
+  let fire;
+  const bare = createShortener({ AbortController: null, fetch: async () => ({ json: () => new Promise(() => {}) }),
+    setTimeout: callback => { fire = callback; return 1; }, clearTimeout: () => {} });
+  const hanging = bare(link);
+  await new Promise(resolve => setImmediate(resolve));
+  fire();
+  assert.deepEqual(await hanging, { ok: false, reason: 'unavailable' });
 });

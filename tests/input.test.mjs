@@ -13,12 +13,12 @@ import { formatCoordinate } from '../src/ui/view-info.ts';
 const bundle = await build({ entryPoints: ['src/main.ts'], bundle: true, write: false, format: 'iife',
   loader: { '.css': 'empty' }, define: { 'import.meta.url': '"http://localhost/src/main.ts"' } });
 
-function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '',
+function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '', search = '',
   fetch = async () => ({ json: async () => ({ shorturl: 'https://is.gd/abc123' }) }) } = {}) {
   const canvases = [], workers = [], timers = new Map(), frames = new Map(), mediaQueries = [];
   const clipboardWrites = [], fetches = [];
   const resizeObservers = [];
-  const location = { origin: 'https://example.org', pathname: '/', search: '', hash, reload() {} };
+  const location = { origin: 'https://example.org', pathname: '/', search, hash, reload() {} };
   const replaced = [];
   const history = { state: null, replaceState(state, title, url) {
     replaced.push(url);
@@ -997,7 +997,8 @@ test('after zooming, coarse passes do not repaint a sharper projected preview', 
 });
 
 test('the share dialog offers a short link from is.gd and the full link, each copied in one click', async () => {
-  const h = harness();
+  // A local switch in the query (?cpu forces the workers) stays here: the link is the view, not this page's settings.
+  const h = harness({ search: '?cpu' });
   h.window.emit('wheel', { clientX: 300, clientY: 200, deltaY: -600, deltaMode: 0 });
   // Shared straight away, before the debounced hash: the link is the view as shown, and the address bar catches up.
   const dialog = h.elements.get('#share-dialog'), full = h.elements.get('#share-full'), short = h.elements.get('#share-short');
@@ -1007,6 +1008,7 @@ test('the share dialog offers a short link from is.gd and the full link, each co
   assert.equal(dialog.open, true);
   assert.match(full.value, /^https:\/\/example\.org\/#re=-?\d+\.\d+&im=-?\d+\.\d+&zoom=[\d.e+-]+$/);
   assert.equal(full.value, `https://example.org/${h.location.hash}`);
+  assert.doesNotMatch(full.value, /cpu/);
   assert.equal(status.dataset.state, 'pending');
   assert.equal(copyShort.attributes['aria-disabled'], 'true');
   await copyShort.listeners.get('click')[0]();
@@ -1020,6 +1022,8 @@ test('the share dialog offers a short link from is.gd and the full link, each co
   assert.equal(status.dataset.state, 'ready');
   assert.equal(copyShort.attributes['aria-disabled'], 'false');
   await copyShort.listeners.get('click')[0]();
+  assert.equal(feedback.textContent, 'Short link copied');
+  assert.equal(feedback.dataset.state, 'copied', 'the feedback line is coloured for whichever button spoke');
   await copyFull.listeners.get('click')[0]();
   assert.deepEqual(h.clipboardWrites, ['https://is.gd/abc123', full.value]);
   assert.equal(copyFull.dataset.state, 'copied');
@@ -1030,6 +1034,7 @@ test('the share dialog offers a short link from is.gd and the full link, each co
   assert.equal(h.request().id, id);
   h.elements.get('#close-share-dialog').emit('click');
   assert.equal(feedback.textContent, '');
+  assert.equal(feedback.dataset.state, 'idle');
   assert.equal(copyFull.dataset.state, 'idle');
   h.elements.get('#share-button').emit('click');
   await new Promise(resolve => setImmediate(resolve));

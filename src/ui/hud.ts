@@ -189,6 +189,9 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   });
 
   closeOnBackdrop(viewDialog);
+  // A rotated phone or resized window changes how many lines the coordinates take.
+  const refitCoordinates = () => { if (viewDialog.open) { fitHeight(inputs.re); fitHeight(inputs.im); } };
+  window.addEventListener('resize', refitCoordinates);
 
   const copyViewButton = copyOnClick(copyButton, copyFeedback, clipboardText,
     'Position and zoom copied', 'Couldn’t copy. Try again, or open a coordinate and select it.');
@@ -256,6 +259,6 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
     update,
     stopZooming,
     setPalette: next => paletteMenu.set(next),
-    dispose() { copyViewButton.dispose(); copyValuesButton.dispose(); share.dispose(); stopZooming(); paletteMenu.dispose(); },
+    dispose() { copyViewButton.dispose(); copyValuesButton.dispose(); share.dispose(); window.removeEventListener('resize', refitCoordinates); stopZooming(); paletteMenu.dispose(); },
   };
 }

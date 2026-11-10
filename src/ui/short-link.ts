@@ -59,7 +59,10 @@ export function createShortener({ fetch, now = Date.now, setTimeout: setTimer = 
 
   async function request(url: string): Promise<ShortenResult> {
     const abort = Abort ? new Abort() : undefined;
-    const timer = setTimer(() => abort?.abort(), SHORTEN_TIMEOUT_MS);
+    let timedOut!: () => void;
+    // Stop waiting at the timeout even without AbortController, or with a fetch that ignores it.
+    const timeout = new Promise<never>((_, reject) => { timedOut = () => reject(new Error('timeout')); });
+    const timer = setTimer(() => { abort?.abort(); timedOut(); }, SHORTEN_TIMEOUT_MS);
     try {
       const response = await Promise.race([
         fetch(SHORTENER_ENDPOINT, {
@@ -69,10 +72,9 @@ export function createShortener({ fetch, now = Date.now, setTimeout: setTimer = 
           cache: 'no-store',
           signal: abort?.signal,
         }),
-        // Also without AbortController (or a fetch that ignores it), stop waiting.
-        new Promise<never>((_, reject) => abort?.signal.addEventListener('abort', () => reject(new Error('timeout')))),
+        timeout,
       ]);
-      const body = await response.json() as { shorturl?: unknown; errorcode?: unknown };
+      const body = await Promise.race([response.json(), timeout]) as { shorturl?: unknown; errorcode?: unknown };
       if (typeof body.shorturl === 'string' && SHORT_URL.test(body.shorturl)) return { ok: true, url: body.shorturl };
       // 1: is.gd refused the long URL (e.g. one it can't reach); 3: rate limit; 2 or 4: anything else.
       if (body.errorcode === 3) {
