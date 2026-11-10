@@ -35,7 +35,8 @@ export function createShareDialog(link: () => string | undefined): ShareDialog {
     shortInput.value = short ?? '';
     shortInput.placeholder = result ? 'Not available' : 'Making…';
     shortStatus.textContent = shortLinkStatus(result);
-    shortStatus.dataset.state = !result ? 'pending' : result.ok ? 'ready' : 'failed';
+    // A local address is expected during development, not a failure: it keeps the plain hint colour.
+    shortStatus.dataset.state = !result ? 'pending' : result.ok ? 'ready' : result.reason === 'local' ? 'local' : 'failed';
     copyShort.setAttribute('aria-disabled', String(!short));
   }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createShortener, MAX_SHORTEN_LENGTH, RATE_LIMIT_WAIT_MS, SHORTEN_TIMEOUT_MS, shortLinkStatus } from '../src/ui/short-link.ts';
+import { createShortener, isLocalAddress, MAX_SHORTEN_LENGTH, RATE_LIMIT_WAIT_MS, SHORTEN_TIMEOUT_MS, shortLinkStatus } from '../src/ui/short-link.ts';
 
 /** A shortener whose is.gd answers with `reply(url)` (a body, or a thrown error), on a clock the test moves. */
 function fake(reply) {
@@ -40,6 +40,21 @@ test('a link is shortened by a simple CORS POST to is.gd, once, however often it
   assert.equal(init.headers, undefined);
   assert.equal(init.body.toString(), `format=json&url=${encodeURIComponent(link).replace(/%20/g, '+')}`);
   assert.equal(f.timers.size, 0, 'the timeout is cleared');
+});
+
+test('local and private-network addresses are not sent: is.gd rejects them, and they would reach no one else', async () => {
+  const f = fake(() => ({ shorturl: 'https://is.gd/R709K6' }));
+  for (const url of ['http://127.0.0.1:59472/?gpu#re=-0.75&im=0&zoom=2', 'http://localhost:5173/', 'http://app.localhost/',
+    'http://[::1]:59472/', 'http://192.168.1.20:59472/', 'http://10.0.0.2/', 'http://172.20.1.1/', 'http://mac-mini.local:59472/',
+    'http://0.0.0.0:59472/', 'http://[fd12:3456::1]/']) {
+    assert.equal(isLocalAddress(url), true, url);
+    assert.deepEqual(await f.shorten(url), { ok: false, reason: 'local' });
+  }
+  assert.equal(f.requests.length, 0);
+  for (const url of ['https://example.org/#re=0', 'http://172.32.0.1/', 'http://11.0.0.1/', 'https://localhost.example.com/', 'not a url']) {
+    assert.equal(isLocalAddress(url), false, url);
+  }
+  assert.match(shortLinkStatus({ ok: false, reason: 'local' }), /only on the published site/);
 });
 
 test('links over 5000 characters are not sent; the dialog explains', async () => {

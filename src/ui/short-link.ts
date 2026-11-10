@@ -16,7 +16,7 @@ export const SHORTEN_TIMEOUT_MS = 8000;
 /** After is.gd reports its rate limit, wait this long before asking again, as its docs ask. */
 export const RATE_LIMIT_WAIT_MS = 60_000;
 
-export type ShortenFailure = 'too-long' | 'rate-limited' | 'rejected' | 'unavailable';
+export type ShortenFailure = 'local' | 'too-long' | 'rate-limited' | 'rejected' | 'unavailable';
 export type ShortenResult = { ok: true; url: string } | { ok: false; reason: ShortenFailure };
 
 export interface ShortenerOptions {
@@ -25,6 +25,22 @@ export interface ShortenerOptions {
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (id: never) => void;
   AbortController?: typeof AbortController;
+}
+
+/**
+ * Whether `url` points at this machine or a private network (the dev server at 127.0.0.1, a phone
+ * testing it over Wi-Fi): is.gd rejects such addresses ("Please enter a valid URL to shorten"), and
+ * a short link to one would be no use to anyone else anyway.
+ */
+export function isLocalAddress(url: string): boolean {
+  let host: string;
+  try { host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch { return false; }
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '0.0.0.0') return true;
+  if (host === '::1' || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) return true;
+  const ip = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (!ip) return false;
+  const [a, b] = [Number(ip[1]), Number(ip[2])];
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
 /** A short link is.gd made, checked so nothing else ends up in the dialog. */
@@ -72,6 +88,7 @@ export function createShortener({ fetch, now = Date.now, setTimeout: setTimer = 
   }
 
   return function shorten(url: string): Promise<ShortenResult> {
+    if (isLocalAddress(url)) return Promise.resolve({ ok: false, reason: 'local' });
     if (url.length > MAX_SHORTEN_LENGTH) return Promise.resolve({ ok: false, reason: 'too-long' });
     const cached = cache.get(url);
     if (cached) return cached;
@@ -90,6 +107,7 @@ export function shortLinkStatus(result: ShortenResult | undefined): string {
   if (!result) return 'Making a short link with is.gd…';
   if (result.ok) return 'Made by is.gd. It opens this exact view.';
   switch (result.reason) {
+    case 'local': return 'Short links work only on the published site: is.gd can’t shorten a local address like this one. The full link below works here.';
     case 'too-long': return `This view’s link is over ${MAX_SHORTEN_LENGTH.toLocaleString('en')} characters, too long for is.gd. Share the full link below instead.`;
     case 'rate-limited': return 'is.gd is limiting requests from this connection. Share the full link below, or try again in a minute.';
     case 'rejected': return 'is.gd wouldn’t shorten this address. Share the full link below instead.';
