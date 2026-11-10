@@ -81,22 +81,24 @@
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
           </button>
         </div>
-        <p id="view-dialog-hint" class="view-dialog-hint">All the digits this zoom level needs. Edit any value, then apply to go there.</p>
-        <div class="view-field">
-          <label for="view-re">Center · real part (Re)</label>
-          <textarea id="view-re" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-re-error"></textarea>
-          <p id="view-re-error" class="field-error"></p>
-        </div>
-        <div class="view-field">
-          <label for="view-im">Center · imaginary part (Im)</label>
-          <textarea id="view-im" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-im-error"></textarea>
-          <p id="view-im-error" class="field-error"></p>
-        </div>
-        <div class="view-field">
-          <label for="view-zoom">Zoom</label>
-          <input id="view-zoom" class="view-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-zoom-hint view-zoom-error" />
-          <p id="view-zoom-hint" class="field-hint">Times the full view, such as 250 or 2.5e12.</p>
-          <p id="view-zoom-error" class="field-error"></p>
+        <div class="view-dialog-body">
+          <p id="view-dialog-hint" class="view-dialog-hint">All the digits this zoom level needs. Edit any value, then apply to go there.</p>
+          <div class="view-field">
+            <label for="view-re">Center · real part (Re)</label>
+            <textarea id="view-re" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-re-error"></textarea>
+            <p id="view-re-error" class="field-error"></p>
+          </div>
+          <div class="view-field">
+            <label for="view-im">Center · imaginary part (Im)</label>
+            <textarea id="view-im" class="view-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-im-error"></textarea>
+            <p id="view-im-error" class="field-error"></p>
+          </div>
+          <div class="view-field">
+            <label for="view-zoom">Zoom</label>
+            <input id="view-zoom" class="view-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="view-zoom-hint view-zoom-error" />
+            <p id="view-zoom-hint" class="field-hint">Times the full view, such as 250 or 2.5e12.</p>
+            <p id="view-zoom-error" class="field-error"></p>
+          </div>
         </div>
         <div class="view-dialog-actions">
           <button id="copy-view-values" class="dialog-copy" type="button" aria-label="Copy position and zoom" title="Copy the current position and zoom">
