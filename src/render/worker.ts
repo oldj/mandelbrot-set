@@ -59,6 +59,8 @@ let wantedKey: number | undefined;
 let orbit: { key: number; spec: ReferenceSpec; data: OrbitData } | undefined;
 let shared: { key: number; promise: Promise<ReferenceEntry> } | undefined;
 let waiting: { key: number; resolve: () => void; reject: (reason: unknown) => void } | undefined;
+/** Pixel requests run one at a time (see samplePixels); a stale one stops at its first checkpoint. */
+let pixelQueue: Promise<void> = Promise.resolve();
 
 self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
   if ('type' in data && data.type === 'palette') {
@@ -74,7 +76,9 @@ self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
   wantedKey = 'type' in data && data.type !== 'pixels' ? undefined : data.reference?.key;
   if (waiting && waiting.key !== wantedKey) { waiting.reject(CANCELLED); waiting = undefined; }
   if ('type' in data && data.type === 'pixels') {
-    void samplePixels(data).catch(error => { if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) }); });
+    // A GPU render sends its pixels in chunks as it leaves them: one after another, in the order sent.
+    pixelQueue = pixelQueue.then(() => samplePixels(data))
+      .catch(error => { if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) }); });
     return;
   }
   if ('type' in data) return;
@@ -347,6 +351,8 @@ async function deepen(request: RenderRequest): Promise<void> {
  * the order given, and send their counts and distance levels in batches.
  */
 async function samplePixels(request: PixelRequest): Promise<void> {
+  // Queued behind a request that ran long, for a render since replaced.
+  if (generation !== request.id) return;
   let lastYield = performance.now();
   const checkpoint = async () => {
     if (generation !== request.id) throw CANCELLED;

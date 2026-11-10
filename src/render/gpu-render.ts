@@ -24,8 +24,9 @@
  * about BATCH_MS of GPU time, so the compositor keeps getting the GPU) and
  * read back per batch, so results can be shown as they come. Each sample is
  * one of: a smooth count (escaped, final); INSIDE (back at an earlier point,
- * with dz/dc settled and the orbit contracting: very likely interior, for the
- * workers to prove);
+ * with dz/dc settled and the orbit contracting, or, in the kernel with the
+ * early test, near an attracting cycle a Newton step locates: very likely
+ * interior, for the workers to prove);
  * SUSPECT (bounded at the budget after returning near an earlier point:
  * probably inside, for the workers too); UNRESOLVED (bounded at the budget
  * otherwise: a larger budget may help); GLITCH (|z| fell far below |Z|,
@@ -46,8 +47,16 @@ const BATCH_MS = 12;
 const IN_FLIGHT = 3;
 /** At most this many pixels' worth of tiles per batch (coarse samples paint blocks): the main thread stages each batch in one go. */
 const MAX_BATCH_TILES = Math.max(1, 65536 / (GPU_TILE * GPU_TILE));
+/**
+ * And at least this many samples: a batch takes about as long as its slowest pixel's iterations until
+ * it fills the GPU, so fewer leave it mostly idle. At 98304 iterations a coarse batch of one tile (256
+ * samples) took 80-99 ms, of 16 tiles 120 ms; shrinking to one tile left a mostly interior coarse pass
+ * at 1874x1516 a minute long, against 6 s. A fine tile alone (4096 samples) about fills it.
+ */
+const MIN_BATCH_SAMPLES = 4096;
 
-const SHADER = /* wgsl */ `
+/** The kernel; with `early`, the early interior test as well (see EARLY). */
+const shader = (early: boolean) => /* wgsl */ `
 struct Params {
   width: u32, height: u32, limit: u32, orbitLength: u32,
   scale: vec2f, one: f32, logScale: f32,
@@ -79,6 +88,20 @@ const CONTRACTED = -3.0;
 const CONFIRM = 4u;
 // |z|² below |Z|² GLITCH_SQUARED: z = Z + δ has cancelled about 18 of δ's 48 bits.
 const GLITCH_SQUARED = 1e-11;
+// The early interior test (see the README): from step EARLY on, a return to the base point b (the
+// smallest |z| since the last one) after P steps, with |z|² within BAND of |b|² and |z - b|² below
+// RETURN |b|², estimates the period-P cycle point near b by a Newton step, b + s with
+// s = (z - b) / (1 - λ), λ = dz_n/dz_b. The pixel is left to the workers as INSIDE once |λ| < 1,
+// |s|² < NEWTON |b|², and that estimate moved by less than DRIFT |z - b|² since the last such
+// return, P steps before: orbits that only linger near a cycle (beside a cusp or a minibrot) keep
+// moving it.
+const EARLY = 2048u;
+// Tracking (λ, the base point) starts here: most escaping orbits are gone by then, untaxed by it.
+const TRACK = 1024u;
+const BAND = 0.25;
+const RETURN = 0.25;
+const NEWTON = 0.25;
+const DRIFT = 0.015625;
 
 // Double-single arithmetic; every error term through an fma against p.one (see gpu-render.ts).
 fn two_sum(a: f32, b: f32) -> vec2f {
@@ -139,6 +162,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Once the tests below pass at step n, the orbit must stay bounded through CONFIRM n before the
   // pixel is taken as inside (0: no candidate yet).
   var confirmUntil = 0u;
+${early ? /* wgsl */ `
+  // The early test's base point (far off until tracking starts) and its step, λ, and the last
+  // qualifying return's period and s - (z - b).
+  var base = vec2f(1e15);
+  var baseN = 0u;
+  var lambda = vec2f(1.0, 0.0);
+  var lastPeriod = 0u;
+  var lastShift = vec2f(0.0);
+` : ''}
   loop {
     if (confirmUntil != 0u && n >= confirmUntil) { count = ${INSIDE}.0; break; }
     if (n >= p.limit) {
@@ -152,6 +184,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (max(abs(e.x), abs(e.y)) > BIG) { e *= SHRINK; one *= SHRINK; k += 60.0; }
     dsq *= 4.0 * (zr * zr + zi * zi);
     if (dsq > BIG) { dsq *= SHRINK; dexp += 60.0; } else if (dsq < SHRINK) { dsq *= BIG; dexp -= 60.0; }
+${early ? /* wgsl */ `
+    if (n >= TRACK) {
+      lambda = 2.0 * vec2f(zr * lambda.x - zi * lambda.y, zr * lambda.y + zi * lambda.x);
+      // Expanding this much: no attracting cycle through here. A new base point follows.
+      if (max(abs(lambda.x), abs(lambda.y)) > BIG) { lambda = vec2f(1.0, 0.0); base = vec2f(1e15); }
+    }
+` : ''}
     // δ' = (2Z + δ) δ + dc
     let ur = add(add(Z.xy, Z.xy), dr);
     let ui = add(add(Z.zw, Z.zw), di);
@@ -175,6 +214,37 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
     if (squared < (Y.x * Y.x + Y.z * Y.z) * GLITCH_SQUARED) { count = ${GLITCH}.0; break; }
     if (squared < dr.x * dr.x + di.x * di.x || m == end) { dr = tr; di = ti; m = 0u; }
+${early ? /* wgsl */ `
+    let baseSquared = dot(base, base);
+    let relative = squared - baseSquared;
+    // A new base point at a new smallest |z|, and at every power of two regardless.
+    var rebase = n > TRACK && (relative < 0.0 || (n & (n - 1u)) == 0u);
+    if (n >= EARLY && n - baseN >= 3u && abs(relative) < BAND * baseSquared) {
+      let x = vec2f(zr, zi) - base;
+      if (dot(x, x) < RETURN * baseSquared) {
+        rebase = true;
+        var qualifies = false;
+        if (dot(lambda, lambda) < 1.0) {
+          let a = vec2f(1.0 - lambda.x, -lambda.y);
+          let s = vec2f(x.x * a.x + x.y * a.y, x.y * a.x - x.x * a.y) / dot(a, a);
+          if (dot(s, s) < NEWTON * baseSquared) {
+            qualifies = true;
+            // The estimate b + s moved since the last return by (z - b then) + s - (s then).
+            let drift = s - lastShift;
+            if (n - baseN == lastPeriod && dot(drift, drift) < DRIFT * dot(x, x)) { count = ${INSIDE}.0; break; }
+            lastPeriod = n - baseN;
+            lastShift = s - x;
+          }
+        }
+        if (!qualifies) { lastPeriod = 0u; }
+      }
+    }
+    if (rebase) {
+      base = vec2f(zr, zi);
+      baseN = n;
+      lambda = vec2f(1.0, 0.0);
+    }
+` : ''}
     // Every 16th step only: each step cost escaping-heavy views 40-80% more time.
     if (confirmUntil == 0u && (n & 15u) == 0u) {
       let gap = vec2f(zr, zi) - saved;
@@ -211,6 +281,11 @@ export interface GpuPass {
   tiles: readonly (readonly [number, number])[];
   /** Per pixel: compute only where 1 (undefined: every sample). */
   mask?: Uint8Array;
+  /**
+   * With the early interior test (see EARLY): for passes over pixels likely to stay bounded. Its
+   * code alone, never firing, made escaping-heavy views 13-17% slower (spirals at 1.9e10 on an M4).
+   */
+  early?: boolean;
   onBatch: (batch: GpuBatch) => void;
 }
 
@@ -258,14 +333,20 @@ export function probePasses(values: ArrayLike<number>): boolean {
   return probeCounts().every((count, k) => Math.abs(values[2 * k] - count) <= 1);
 }
 
+/** The kernel without and with the early interior test (once compiled and tested). */
+interface Pipelines { plain: GPUComputePipeline; early?: GPUComputePipeline }
+
+const compile = (device: GPUDevice, early: boolean) => device.createComputePipelineAsync({
+  layout: 'auto', compute: { module: device.createShaderModule({ code: shader(early) }), entryPoint: 'main' } });
+
 export class GpuRenderer {
   private readonly device: GPUDevice;
-  private readonly pipeline: GPUComputePipeline;
+  readonly pipelines: Pipelines;
   private lost = false;
 
-  private constructor(device: GPUDevice, pipeline: GPUComputePipeline) {
+  private constructor(device: GPUDevice, pipelines: Pipelines) {
     this.device = device;
-    this.pipeline = pipeline;
+    this.pipelines = pipelines;
     void device.lost.then(() => { this.lost = true; });
     // A validation or out-of-memory error leaves zeros where results should be: never trust this device again.
     device.addEventListener('uncapturederror', event => {
@@ -287,14 +368,18 @@ export class GpuRenderer {
       // Large canvases need more than WebGPU's default 128 MiB bindings (the mask is a byte a pixel).
       const device = await adapter.requestDevice({ requiredLimits: {
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
-      const module = device.createShaderModule({ code: SHADER });
-      const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-      const renderer = new GpuRenderer(device, pipeline);
-      if (!await renderer.selfTest()) {
+      const renderer = new GpuRenderer(device, { plain: await compile(device, false) });
+      if (!await renderer.selfTest(renderer.pipelines.plain)) {
         console.warn('GPU rendering unavailable: the GPU failed its precision self-test; rendering on the workers.');
         device.destroy();
         return undefined;
       }
+      // The kernel with the early interior test is ready a little later: passes use the plain one until
+      // then. Compiling and testing both before the first render delayed it by about 100 ms.
+      void compile(device, true).then(async early => {
+        if (await renderer.selfTest(early)) renderer.pipelines.early = early;
+        else console.warn('The GPU failed the self-test with the early interior test; rendering without it.');
+      }, () => undefined);
       return renderer;
     } catch (error) {
       console.warn('GPU rendering unavailable:', error);
@@ -302,10 +387,13 @@ export class GpuRenderer {
     }
   }
 
-  /** Run the probe (see probeCounts) through the real kernel, buffers and readback. */
-  private async selfTest(): Promise<boolean> {
-    const job = this.job({ view: { logScale: PROBE_LOG_SCALE } as View, width: PROBE_WIDTH, height: 1,
-      cssWidth: PROBE_WIDTH, cssHeight: 1, current: () => true });
+  /**
+   * Run the probe (see probeCounts) through a kernel, buffers and readback. Its orbits creep past a
+   * parabolic point for thousands of steps, so the early test must not take them for interior either.
+   */
+  private async selfTest(pipeline: GPUComputePipeline): Promise<boolean> {
+    const job = new GpuJob(this.device, { plain: pipeline }, { view: { logScale: PROBE_LOG_SCALE } as View, width: PROBE_WIDTH, height: 1,
+      cssWidth: PROBE_WIDTH, cssHeight: 1, current: () => true }, () => this.lost);
     try {
       const zeros = new Float64Array(2);
       job.setOrbit({ re: zeros, im: zeros, exp: zeros }, PROBE_CENTRE, 0);
@@ -325,13 +413,13 @@ export class GpuRenderer {
 
   /** Buffers for one view: give it an orbit, run passes, then dispose() it. */
   job(target: GpuView): GpuJob {
-    return new GpuJob(this.device, this.pipeline, target, () => this.lost);
+    return new GpuJob(this.device, this.pipelines, target, () => this.lost);
   }
 }
 
 export class GpuJob {
   private readonly device: GPUDevice;
-  private readonly pipeline: GPUComputePipeline;
+  private readonly pipelines: Pipelines;
   private readonly target: GpuView;
   private readonly lost: () => boolean;
   private readonly result: GPUBuffer;
@@ -342,9 +430,9 @@ export class GpuJob {
   /** Tiles per batch, adapted to BATCH_MS for each step. */
   private readonly batchTiles = new Map<number, number>();
 
-  constructor(device: GPUDevice, pipeline: GPUComputePipeline, target: GpuView, lost: () => boolean) {
+  constructor(device: GPUDevice, pipelines: Pipelines, target: GpuView, lost: () => boolean) {
     this.device = device;
-    this.pipeline = pipeline;
+    this.pipelines = pipelines;
     this.target = target;
     this.lost = lost;
     const { width, height, cssWidth, cssHeight } = target;
@@ -382,8 +470,9 @@ export class GpuJob {
   }
 
   /** Run a pass, batch by batch; false if it stopped (a newer render, or the device was lost). */
-  async pass({ iterations, step, tiles, mask, onBatch }: GpuPass): Promise<boolean> {
+  async pass({ iterations, step, tiles, mask, early = false, onBatch }: GpuPass): Promise<boolean> {
     const { width, height, view, current } = this.target, device = this.device, orbit = this.orbit!;
+    const pipeline = early && this.pipelines.early || this.pipelines.plain;
     const side = GPU_TILE / step, perTile = side * side;
     if (mask) {
       // A byte a pixel, padded to whole words.
@@ -399,7 +488,8 @@ export class GpuJob {
     split(2 ** view.logScale, scale, 0);
     // Up to IN_FLIGHT batches queued at once, so the GPU never waits for a readback to be processed.
     const inFlight: { first: number; count: number; read: GPUBuffer; uniform: GPUBuffer; mapped: Promise<unknown> }[] = [];
-    let batch = Math.min(this.batchTiles.get(step) ?? 1, MAX_BATCH_TILES), next = 0, submitted = 0, stopped = false, lastDone = performance.now(), lastYield = lastDone;
+    const fewest = Math.min(MAX_BATCH_TILES, Math.ceil(MIN_BATCH_SAMPLES / perTile));
+    let batch = Math.max(fewest, Math.min(this.batchTiles.get(step) ?? 1, MAX_BATCH_TILES)), next = 0, submitted = 0, stopped = false, lastDone = performance.now(), lastYield = lastDone;
     const submit = () => {
       const count = Math.min(batch, tiles.length - next), first = next;
       next += count;
@@ -413,13 +503,13 @@ export class GpuJob {
       const bytes = count * perTile * 8;
       const read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(uniform, 0, params);
-      const bind = device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+      const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: orbit.buffer } }, { binding: 1, resource: { buffer: this.result } },
         { binding: 2, resource: { buffer: uniform } }, { binding: 3, resource: { buffer: this.xs } },
         { binding: 4, resource: { buffer: this.ys } }, { binding: 5, resource: { buffer: this.mask } },
         { binding: 6, resource: { buffer: tileBuffer } }] });
       const encoder = device.createCommandEncoder(), computePass = encoder.beginComputePass();
-      computePass.setPipeline(this.pipeline);
+      computePass.setPipeline(pipeline);
       computePass.setBindGroup(0, bind);
       computePass.dispatchWorkgroups(Math.ceil(side / 8), Math.ceil(side / 8), count);
       computePass.end();
@@ -446,7 +536,7 @@ export class GpuJob {
           const now = performance.now(), elapsed = now - lastDone;
           lastDone = now;
           if (elapsed < BATCH_MS / 2) batch = Math.min(batch * 2, MAX_BATCH_TILES);
-          else if (elapsed > BATCH_MS * 2 && batch > 1) batch = Math.max(1, batch >> 1);
+          else if (elapsed > BATCH_MS * 2 && batch > fewest) batch = Math.max(fewest, batch >> 1);
         } else stopped = true;
         done.read.destroy();
         done.uniform.destroy();

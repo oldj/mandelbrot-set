@@ -21,7 +21,8 @@ function fakeDevice() {
 function job(state) {
   const size = 2 * GPU_TILE;
   const target = { view: { logScale: -8 }, width: size, height: size, cssWidth: size, cssHeight: size, current: () => state.current };
-  const result = new GpuJob(fakeDevice(), { getBindGroupLayout: () => ({}) }, target, () => state.lost);
+  const pipeline = { getBindGroupLayout: () => ({}) };
+  const result = new GpuJob(fakeDevice(), { plain: pipeline, early: pipeline }, target, () => state.lost);
   result.setOrbit({ re: [0, 0], im: [0, 0], exp: [0, 0] }, 0, 0);
   const tiles = [];
   for (let y = 0; y < size; y += GPU_TILE) for (let x = 0; x < size; x += GPU_TILE) tiles.push([x, y]);
