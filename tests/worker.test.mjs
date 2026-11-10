@@ -388,6 +388,51 @@ test('a pixel job samples listed pixels exactly as a render does, and flags thos
   assert.ok(flagged > 0 && flagged < got.size, `some pixels left unresolved at this budget (${flagged})`);
 });
 
+test('a shallow pixel job proves interiors as a render\'s rows do, in any order', async t => {
+  // Near the period-3 bulb, plain single samples (directDouble) leave hundreds of interior pixels unresolved at
+  // this budget; rows (directRow) prove them. Which pixels a proof reaches can depend on the cycle hint a row
+  // carries (so on the order), but the job must leave about as few as the render does, not ~400.
+  const width = 96, height = 64, cssWidth = 96, cssHeight = 64, iterations = 4096;
+  const base = initialView(cssWidth, cssHeight);
+  const view = ensurePrecision({ ...base, logScale: base.logScale - 5 });
+  view.re = toFixed(-0.125, view.bits); view.im = toFixed(0.6495, view.bits);
+  let render;
+  const tiles = await new Promise((resolve, reject) => {
+    const worker = startWorker(t), all = [];
+    worker.on('error', reject);
+    worker.on('message', message => {
+      if (message.type === 'tiles') all.push(...message.tiles);
+      if (message.type === 'pass' && message.step === 1) { render = message; resolve(all.filter(tile => tile.step === 1)); }
+    });
+    worker.postMessage({ id: 1, view, width, height, cssWidth, cssHeight, iterations, workerIndex: 0, workerCount: 1 });
+  });
+  const expected = new Float32Array(width * height);
+  for (const tile of tiles) for (let row = 0; row < tile.height; row++) for (let col = 0; col < tile.width; col++) {
+    expected[(tile.y + row) * width + tile.x + col] = tile.counts[row * tile.width + col];
+  }
+  assert.ok(render.pending > 0 && render.pending < 60, `the render leaves a few unresolved (${render.pending})`);
+  const raster = Array.from({ length: width * height }, (_, k) => k);
+  for (const pixels of [Uint32Array.from(raster), Uint32Array.from(raster, k => (k * 7919) % (width * height))]) {
+    const worker = startWorker(t), flags = new Uint8Array(width * height);
+    const done = await new Promise((resolve, reject) => {
+      worker.on('error', reject);
+      worker.on('message', message => {
+        if (message.type !== 'samples') return;
+        message.indices.forEach((i, k) => {
+          assert.equal(message.counts[k], expected[i], `count at ${i}`);
+          flags[i] = message.unresolved[k];
+          if (flags[i]) assert.equal(message.counts[k], -1, `an unresolved pixel at ${i} is unescaped`);
+        });
+        if (message.done) resolve(message.done);
+      });
+      worker.postMessage({ type: 'pixels', id: 2, view, width, height, cssWidth, cssHeight, iterations, pixels, round: 0 });
+    });
+    const flagged = flags.reduce((sum, flag) => sum + flag, 0);
+    assert.equal(done.unresolved, flagged);
+    assert.ok(flagged <= render.pending * 1.5 + 4, `${flagged} unresolved, the render ${render.pending}`);
+  }
+});
+
 test('an orbit-only pixel job builds and sends the shared orbit, and no samples a round could miscount', async t => {
   // GPU renders have worker 0 build the shared orbit with an empty request. Its samples message with
   // `done` once reached the main thread while a round of real requests was under way, and was counted

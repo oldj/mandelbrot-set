@@ -377,13 +377,26 @@ async function samplePixels(request: PixelRequest): Promise<void> {
       [indices.buffer, batchCounts.buffer, batchDistances.buffer, batchFlags.buffer]);
     start = end; lastFlush = performance.now();
   };
-  for (let k = 0; k < pixels.length; k++) {
-    const index = pixels[k], x = index % width, y = (index - x) / width;
-    counts[k] = sampler!.sample(toCss(x, width, cssWidth), toCss(y, height, cssHeight));
-    distances[k] = encodeDistance(lastDistance() * physical);
-    if (lastUnresolved()) { unresolved++; flags[k] = 1; }
+  // Runs of listed pixels on one row (up to a tile's width) go through row() where the sampler has it,
+  // as a render's rows do: shallow views prove interiors there (directRow), not in sample().
+  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), rowDistances = new Float64Array(TILE_SIZE);
+  const rowFlags = new Uint8Array(TILE_SIZE);
+  for (let k = 0; k < pixels.length;) {
+    const y = Math.floor(pixels[k] / width);
+    let count = 0;
+    while (count < TILE_SIZE && k + count < pixels.length && Math.floor(pixels[k + count] / width) === y) {
+      xs[count] = toCss(pixels[k + count] - y * width, width, cssWidth);
+      count++;
+    }
+    const cssY = toCss(y, height, cssHeight);
+    if (sampler!.row) sampler!.row(xs, count, cssY, values, rowDistances, rowFlags);
+    else for (let j = 0; j < count; j++) { values[j] = sampler!.sample(xs[j], cssY); rowDistances[j] = lastDistance(); rowFlags[j] = lastUnresolved() ? 1 : 0; }
+    for (let j = 0; j < count; j++, k++) {
+      counts[k] = values[j]; distances[k] = encodeDistance(rowDistances[j] * physical);
+      if (rowFlags[j]) { unresolved++; flags[k] = 1; }
+    }
     await checkpoint();
-    if (performance.now() - lastFlush >= FLUSH_MS) flush(k + 1);
+    if (performance.now() - lastFlush >= FLUSH_MS) flush(k);
   }
   flush(pixels.length, { samples: pixels.length, unresolved, fallbacks: sampler?.stats.fallbacks ?? 0 });
 }
