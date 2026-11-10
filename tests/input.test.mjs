@@ -13,11 +13,12 @@ import { formatCoordinate } from '../src/ui/view-info.ts';
 const bundle = await build({ entryPoints: ['src/main.ts'], bundle: true, write: false, format: 'iife',
   loader: { '.css': 'empty' }, define: { 'import.meta.url': '"http://localhost/src/main.ts"' } });
 
-function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '' } = {}) {
+function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '',
+  fetch = async () => ({ json: async () => ({ shorturl: 'https://is.gd/abc123' }) }) } = {}) {
   const canvases = [], workers = [], timers = new Map(), frames = new Map(), mediaQueries = [];
-  const clipboardWrites = [];
+  const clipboardWrites = [], fetches = [];
   const resizeObservers = [];
-  const location = { pathname: '/', search: '', hash, reload() {} };
+  const location = { origin: 'https://example.org', pathname: '/', search: '', hash, reload() {} };
   const replaced = [];
   const history = { state: null, replaceState(state, title, url) {
     replaced.push(url);
@@ -83,7 +84,8 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   const documentTarget = new Target();
   const canvas = new Canvas(), window = new Target();
   const elements = new Map([['#mandelbrot', canvas], ...['#view-info', '#centre-real', '#centre-imag', '#zoom-level', '#view-controls', '#reset-view', '#palette-picker', '#palette-button', '#palette-menu', '#zoom-in', '#zoom-out', '#copy-view', '#copy-feedback',
-    '#view-dialog', '#view-form', '#close-view-dialog', '#view-re', '#view-im', '#view-zoom', '#view-re-error', '#view-im-error', '#view-zoom-error', '#copy-view-values', '#view-copy-feedback'].map(id => [id, new Target()])]);
+    '#view-dialog', '#view-form', '#close-view-dialog', '#view-re', '#view-im', '#view-zoom', '#view-re-error', '#view-im-error', '#view-zoom-error', '#copy-view-values', '#view-copy-feedback',
+    '#share-button', '#share-dialog', '#close-share-dialog', '#share-short', '#share-short-status', '#share-full', '#copy-share-short', '#copy-share-full', '#share-copy-feedback'].map(id => [id, new Target()])]);
   canvas.rect = { left: 0, top: 0, right: width, bottom: height, width, height };
   elements.get('#palette-picker').append(elements.get('#palette-button'), elements.get('#palette-menu'));
   elements.get('#palette-menu').hidden = true;
@@ -94,6 +96,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     window, location, history, URLSearchParams, navigator: { hardwareConcurrency: cores, clipboard: clipboardWrite ? {
       writeText: async text => { clipboardWrites.push(text); await clipboardWrite(text); },
     } : undefined }, Worker: FakeWorker, URL,
+    fetch: (input, init) => { fetches.push({ input, init }); return fetch(input, init); },
     getComputedStyle: () => ({ font: '', fontSize: '11px', fontFamily: 'monospace', fontWeight: '400', letterSpacing: '0.11px' }),
     ResizeObserver: class {
       targets = [];
@@ -113,7 +116,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
   const flushFrames = (time = 0) => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(time)); };
-  return { canvas, window, document: documentTarget, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
+  return { canvas, window, document: documentTarget, workers, canvases, elements, flush, flushFrames, mediaQueries, clipboardWrites, fetches, resizeObservers, location, replaced, request: () => workers[0].messages.at(-1) };
 }
 function complexAt(view, x, y) {
   return [view.re + scaledFixed(x - 400, view.logScale, view.bits), view.im - scaledFixed(y - 300, view.logScale, view.bits)];
@@ -991,6 +994,70 @@ test('after zooming, coarse passes do not repaint a sharper projected preview', 
   h.workers[0].emit({ type: 'tiles', id: next.id, tiles: [tile(8)] });
   h.flushFrames();
   assert.equal(fresh.draws.length, before + 1);
+});
+
+test('the share dialog offers a short link from is.gd and the full link, each copied in one click', async () => {
+  const h = harness();
+  h.window.emit('wheel', { clientX: 300, clientY: 200, deltaY: -600, deltaMode: 0 });
+  // Shared straight away, before the debounced hash: the link is the view as shown, and the address bar catches up.
+  const dialog = h.elements.get('#share-dialog'), full = h.elements.get('#share-full'), short = h.elements.get('#share-short');
+  const copyShort = h.elements.get('#copy-share-short'), copyFull = h.elements.get('#copy-share-full');
+  const status = h.elements.get('#share-short-status'), feedback = h.elements.get('#share-copy-feedback');
+  h.elements.get('#share-button').emit('click');
+  assert.equal(dialog.open, true);
+  assert.match(full.value, /^https:\/\/example\.org\/#re=-?\d+\.\d+&im=-?\d+\.\d+&zoom=[\d.e+-]+$/);
+  assert.equal(full.value, `https://example.org/${h.location.hash}`);
+  assert.equal(status.dataset.state, 'pending');
+  assert.equal(copyShort.attributes['aria-disabled'], 'true');
+  await copyShort.listeners.get('click')[0]();
+  assert.equal(h.clipboardWrites.length, 0, 'nothing to copy until is.gd answers');
+  // One request, to is.gd, carrying the full link.
+  assert.equal(h.fetches.length, 1);
+  assert.equal(h.fetches[0].input, 'https://is.gd/create.php');
+  assert.equal(h.fetches[0].init.body.get('url'), full.value);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(short.value, 'https://is.gd/abc123');
+  assert.equal(status.dataset.state, 'ready');
+  assert.equal(copyShort.attributes['aria-disabled'], 'false');
+  await copyShort.listeners.get('click')[0]();
+  await copyFull.listeners.get('click')[0]();
+  assert.deepEqual(h.clipboardWrites, ['https://is.gd/abc123', full.value]);
+  assert.equal(copyFull.dataset.state, 'copied');
+  assert.equal(feedback.textContent, 'Full link copied');
+  // Shortcuts stay off while it is open; closing clears the feedback, and reopening reuses the short link.
+  const id = h.request().id;
+  h.window.emit('keydown', { key: '0', code: 'Digit0' });
+  assert.equal(h.request().id, id);
+  h.elements.get('#close-share-dialog').emit('click');
+  assert.equal(feedback.textContent, '');
+  assert.equal(copyFull.dataset.state, 'idle');
+  h.elements.get('#share-button').emit('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.fetches.length, 1, 'cached: is.gd links are permanent');
+  assert.equal(short.value, 'https://is.gd/abc123');
+});
+
+test('when is.gd fails, the share dialog says why and still copies the full link', async () => {
+  const h = harness({ fetch: async () => { throw new TypeError('Failed to fetch'); } });
+  h.window.emit('wheel', { clientX: 300, clientY: 200, deltaY: -600, deltaMode: 0 });
+  h.elements.get('#share-button').emit('click');
+  await new Promise(resolve => setImmediate(resolve));
+  const status = h.elements.get('#share-short-status'), copyShort = h.elements.get('#copy-share-short');
+  assert.equal(status.dataset.state, 'failed');
+  assert.match(status.textContent, /Couldn’t reach is\.gd/);
+  assert.equal(h.elements.get('#share-short').value, '');
+  assert.equal(copyShort.attributes['aria-disabled'], 'true');
+  await copyShort.listeners.get('click')[0]();
+  await h.elements.get('#copy-share-full').listeners.get('click')[0]();
+  assert.deepEqual(h.clipboardWrites, [h.elements.get('#share-full').value]);
+  // An answer arriving after the dialog closed is dropped.
+  let answer;
+  const late = harness({ fetch: () => new Promise(resolve => { answer = resolve; }) });
+  late.elements.get('#share-button').emit('click');
+  late.elements.get('#close-share-dialog').emit('click');
+  answer({ json: async () => ({ shorturl: 'https://is.gd/late00' }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(late.elements.get('#share-short').value, '');
 });
 
 test('the URL hash follows the view, restores a shared view and clears on reset', () => {

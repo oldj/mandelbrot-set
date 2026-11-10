@@ -757,6 +757,7 @@ function scheduleDraw(): void {
 const hud = createHud({
   canvas, measure: ctx, requestDraw: scheduleDraw, onReset: () => resetView(), palette,
   onPalette: next => setPalette(next),
+  shareLink: () => shareLink(),
   current: () => view && { view, cssWidth, cssHeight },
   onApply: next => { goTo(next); writeHash(); },
   onZoom: logFactor => {
@@ -887,6 +888,12 @@ function writeHash(): void {
     palette === 'classic' ? '' : `palette=${palette}`].filter(Boolean).join('&');
   const url = location.pathname + location.search + (hash ? `#${hash}` : '');
   if (url !== location.pathname + location.search + location.hash) history.replaceState(history.state, '', url);
+}
+/** The full address of the view as shown now, for sharing (the hash is otherwise written a moment after a change). */
+function shareLink(): string | undefined {
+  if (!view) return undefined;
+  writeHash();
+  return location.origin + location.pathname + location.search + location.hash;
 }
 function scheduleHash(): void {
   clearTimeout(hashTimer);

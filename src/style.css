@@ -49,6 +49,7 @@ canvas.dragging { cursor: grabbing; }
 
 .site-heading,
 .github-link,
+.share-button,
 .view-info,
 .reset-view,
 .zoom-button,
@@ -68,6 +69,7 @@ canvas.dragging { cursor: grabbing; }
 /* The rim: a 1px gradient ring, masked so the glass inside stays clear. */
 .site-heading::before,
 .github-link::before,
+.share-button::before,
 .view-info::before,
 .reset-view::before,
 .zoom-button::before,
@@ -89,13 +91,13 @@ canvas.dragging { cursor: grabbing; }
   :root { --glass-tint: rgb(12 19 33 / 0.9); }
 }
 
-.site-heading,
-.github-link { position: fixed; }
+.site-heading { position: fixed; }
 
 .site-heading {
   top: max(20px, env(safe-area-inset-top));
   left: max(20px, env(safe-area-inset-left));
-  max-width: calc(100vw - var(--hud-left) - var(--hud-right) - 56px);
+  /* Clear of the two buttons at the top right. */
+  max-width: calc(100vw - var(--hud-left) - var(--hud-right) - 108px);
   padding: 17px 20px 15px;
   border-radius: 18px;
   pointer-events: none;
@@ -126,19 +128,30 @@ canvas.dragging { cursor: grabbing; }
 .reference-link svg { width: 15px; height: 15px; }
 .reference-link:hover { color: var(--text); background: var(--chip-hover); }
 .reference-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.github-link {
+.site-actions {
+  position: fixed;
   top: max(20px, env(safe-area-inset-top));
   right: var(--hud-right);
+  display: flex;
+  gap: 8px;
+}
+.github-link,
+.share-button {
+  position: relative;
   display: grid;
   place-items: center;
   width: 44px;
   height: 44px;
+  padding: 0;
   border-radius: 14px;
   color: var(--text-soft);
+  cursor: pointer;
   touch-action: manipulation;
 }
 .github-link svg { width: 22px; height: 22px; filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35)); }
-.github-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.share-button svg { width: 20px; height: 20px; filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35)); }
+.github-link:focus-visible,
+.share-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 /*
  * A 44px touch target for the 28px link, without making the title row (and so
  * the space between title and formula) taller than on other devices.
@@ -316,6 +329,7 @@ canvas.dragging { cursor: grabbing; }
 /* Glass buttons brighten and lift slightly under the pointer, and press in. */
 @media (hover: hover) {
   .github-link:hover,
+  .share-button:hover,
   .reset-view:hover,
   .zoom-button:hover {
     background-color: rgb(255 255 255 / 0.08);
@@ -325,6 +339,7 @@ canvas.dragging { cursor: grabbing; }
   }
 }
 .github-link:active,
+.share-button:active,
 .reset-view:active,
 .zoom-button:active,
 .zoom-button.holding { transform: translateY(0) scale(0.97); background-color: rgb(255 255 255 / 0.12); }
@@ -401,7 +416,8 @@ canvas.dragging { cursor: grabbing; }
 /* The title and the actions stay in place; only the fields between them scroll (long coordinates at
    deep zooms). The display applies when open only: an author display would show the closed dialog. */
 .view-dialog[open] { display: flex; flex-direction: column; }
-.view-dialog form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; margin: 0; }
+.view-dialog form,
+.view-dialog .dialog-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; margin: 0; }
 .view-dialog-header, .view-dialog-actions { flex: none; }
 /* Out to the dialog's sides, so a scroll bar sits at its edge rather than over the fields. */
 .view-dialog-body {
@@ -502,6 +518,20 @@ textarea.view-input {
 }
 .dialog-apply:hover { background: rgb(159 216 255 / 0.26); }
 
+/* The share dialog: the short link is the main action, at the right like Apply; it waits for is.gd. */
+.dialog-primary {
+  margin-left: auto;
+  border-color: rgb(159 216 255 / 0.4);
+  background: rgb(159 216 255 / 0.16);
+  color: var(--text);
+}
+.dialog-primary:hover { background: rgb(159 216 255 / 0.26); }
+.dialog-primary[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.dialog-primary[aria-disabled="true"]:hover { background: rgb(159 216 255 / 0.16); }
+.share-status { min-height: 1.6em; }
+.share-status[data-state="failed"] { color: #ffd9a8; }
+.share-dialog .view-input[readonly] { cursor: text; }
+
 @media (max-width: 640px) {
   /* Full-width coordinates along the bottom; reset sits above them, still on the right. */
   .hud-bottom { flex-direction: column-reverse; align-items: flex-end; gap: 8px; }
@@ -525,7 +555,7 @@ textarea.view-input {
     left: max(12px, env(safe-area-inset-left));
     padding: 14px 16px 12px;
   }
-  .github-link { top: max(12px, env(safe-area-inset-top)); }
+  .site-actions { top: max(12px, env(safe-area-inset-top)); }
 }
 
 @media (pointer: coarse) {
@@ -537,7 +567,7 @@ textarea.view-input {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .site-heading, .github-link, .view-info, .reset-view, .copy-view, .reference-link, .dialog-close, .dialog-copy, .dialog-apply, .view-input, .zoom-button, .palette-option { transition: none; }
-  .github-link:hover, .reset-view:hover, .github-link:active, .reset-view:active, .copy-view:active,
+  .site-heading, .github-link, .share-button, .view-info, .reset-view, .copy-view, .reference-link, .dialog-close, .dialog-copy, .dialog-apply, .view-input, .zoom-button, .palette-option { transition: none; }
+  .github-link:hover, .share-button:hover, .reset-view:hover, .github-link:active, .share-button:active, .reset-view:active, .copy-view:active,
   .zoom-button:hover, .zoom-button:active, .zoom-button.holding { transform: none; }
 }

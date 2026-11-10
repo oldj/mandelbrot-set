@@ -3,7 +3,7 @@
  * to fit their boxes) and the magnification, which open the view dialog (all
  * digits, copy, edit and apply); copying the view to the clipboard; the reset
  * button, only shown away from the initial view; the zoom buttons; the
- * palette menu; and the keyboard shortcuts (+ and - zoom, 0 and Home reset,
+ * palette menu; the share dialog (share-dialog.ts); and the keyboard shortcuts (+ and - zoom, 0 and Home reset,
  * C the next palette).
  * main.ts owns the view; the panel reads it through `current`, is refreshed
  * from each drawn frame, and asks for changes through the callbacks.
@@ -16,6 +16,8 @@ import { createPaletteMenu } from './palette-menu.ts';
 import { formatZoomText } from './url-state.ts';
 import { compactCoordinate, formatCoordinate, viewClipboardText, viewInfo } from './view-info.ts';
 import { readViewFields } from './view-form.ts';
+import { closeOnBackdrop, copyOnClick, fitHeight } from './dialog.ts';
+import { createShareDialog } from './share-dialog.ts';
 import type { ViewFields } from './view-form.ts';
 
 export interface HudOptions {
@@ -35,6 +37,8 @@ export interface HudOptions {
   /** The palette in use at first, and the one chosen in the palette menu (or with C, the next one). */
   palette: Palette;
   onPalette: (palette: Palette) => void;
+  /** The full address of the view as shown now, for the share dialog. */
+  shareLink: () => string | undefined;
 }
 
 export interface Hud {
@@ -47,7 +51,7 @@ export interface Hud {
   dispose(): void;
 }
 
-export function createHud({ canvas, measure, current, requestDraw, onReset, onApply, onZoom, palette, onPalette }: HudOptions): Hud {
+export function createHud({ canvas, measure, current, requestDraw, onReset, onApply, onZoom, palette, onPalette, shareLink }: HudOptions): Hud {
   const infoPanel = document.querySelector<HTMLElement>('#view-info')!;
   const realLabel = document.querySelector<HTMLButtonElement>('#centre-real')!;
   const imaginaryLabel = document.querySelector<HTMLButtonElement>('#centre-imag')!;
@@ -128,14 +132,6 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   // was opened with is kept, so untouched fields keep their exact values.
   let opened: { view: View; initialLogScale: number; fields: ViewFields } | undefined;
 
-  /** Coordinates can run to thousands of digits: grow their boxes with the text (CSS caps them). */
-  function fitHeight(input: HTMLTextAreaElement): void {
-    input.style.height = 'auto';
-    input.style.height = `${input.scrollHeight + input.offsetHeight - input.clientHeight}px`;
-    // Scroll only once capped: line heights round, and a sub-pixel overflow would show a scrollbar.
-    input.style.overflowY = input.scrollHeight > input.clientHeight + 1 ? 'auto' : 'hidden';
-  }
-
   function setError(field: keyof ViewFields, message: string): void {
     fieldErrors[field].textContent = message;
     if (message) inputs[field].setAttribute('aria-invalid', 'true');
@@ -192,31 +188,18 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
     if (result.changed) onApply(result.view);
   });
 
-  // A click on the backdrop closes the dialog. The browser reports backdrop clicks
-  // as clicks on the <dialog> itself, as it does clicks on its padding, so check
-  // that the point lies outside the box. The press must start outside too:
-  // selecting digits and releasing past the edge must not close it.
-  const outside = (event: MouseEvent) => {
-    if (event.target !== viewDialog) return false;
-    const box = viewDialog.getBoundingClientRect();
-    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
-  };
-  let pressedOutside = false;
-  viewDialog.addEventListener('pointerdown', event => { pressedOutside = outside(event); });
-  viewDialog.addEventListener('click', event => {
-    if (pressedOutside && outside(event)) viewDialog.close();
-    pressedOutside = false;
-  });
-  viewDialog.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
+  closeOnBackdrop(viewDialog);
 
-  const stopCopyView = copyOnClick(copyButton, copyFeedback, clipboardText,
+  const copyViewButton = copyOnClick(copyButton, copyFeedback, clipboardText,
     'Position and zoom copied', 'Couldn’t copy. Try again, or open a coordinate and select it.');
-  const stopCopyValues = copyOnClick(copyValues, valuesFeedback, clipboardText,
+  const copyValuesButton = copyOnClick(copyValues, valuesFeedback, clipboardText,
     'Copied', 'Couldn’t copy. Select the digits and copy them instead.');
   viewDialog.addEventListener('close', () => {
-    valuesFeedback.textContent = ''; copyValues.dataset.state = 'idle';
+    copyValuesButton.reset();
     opened = undefined;
   });
+
+  const share = createShareDialog(shareLink);
 
   resetButton.addEventListener('click', onReset);
   const paletteMenu = createPaletteMenu(document.querySelector<HTMLElement>('#palette-picker')!,
@@ -232,7 +215,7 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
   const shortcutZoom = (key: string) => key === '+' || key === '=' ? zoomIn : key === '-' || key === '_' ? zoomOut : undefined;
   const onKeyDown = (event: KeyboardEvent) => {
     // Browser zoom (Ctrl/⌘ with + or -) and other shortcuts are left alone, as is typing.
-    if (viewDialog.open || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+    if (viewDialog.open || share.open || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? '')) return;
     const control = shortcutZoom(event.key);
@@ -273,41 +256,6 @@ export function createHud({ canvas, measure, current, requestDraw, onReset, onAp
     update,
     stopZooming,
     setPalette: next => paletteMenu.set(next),
-    dispose() { stopCopyView(); stopCopyValues(); stopZooming(); paletteMenu.dispose(); },
+    dispose() { copyViewButton.dispose(); copyValuesButton.dispose(); share.dispose(); stopZooming(); paletteMenu.dispose(); },
   };
-}
-
-/**
- * Copy `text()` to the clipboard when `button` is clicked, showing progress on
- * the button (data-state: pending, copied, error, idle) and in `feedback`, a
- * live region, until it resets after 2 s (4 s for errors). Returns a function
- * that cancels a pending reset.
- */
-function copyOnClick(button: HTMLButtonElement, feedback: HTMLElement, text: () => string | undefined,
-  copied: string, failed: string): () => void {
-  let timer: ReturnType<typeof setTimeout>;
-  button.addEventListener('click', async () => {
-    const value = text();
-    if (button.disabled || value === undefined) return;
-    clearTimeout(timer);
-    button.disabled = true;
-    button.dataset.state = 'pending';
-    feedback.textContent = 'Copying…';
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(value);
-      button.dataset.state = 'copied';
-      feedback.textContent = copied;
-    } catch {
-      button.dataset.state = 'error';
-      feedback.textContent = failed;
-    } finally {
-      button.disabled = false;
-      timer = setTimeout(() => {
-        feedback.textContent = '';
-        button.dataset.state = 'idle';
-      }, button.dataset.state === 'copied' ? 2000 : 4000);
-    }
-  });
-  return () => clearTimeout(timer);
 }
