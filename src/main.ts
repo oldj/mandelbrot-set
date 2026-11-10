@@ -207,6 +207,14 @@ async function bulbPixels(target: Surface, width: number, height: number, curren
   const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
   const xs = new Float64Array(width);
   for (let x = 0; x < width; x++) xs[x] = re + toCss(x, width, cssWidth) * scale;
+  // The coarse samples' pixels first (a sixteenth of the work): a view just outside the bulbs (seahorse
+  // valley at 1000x) stops there. A sliver they all miss is left to the GPU, as before.
+  let near = false;
+  for (let y = 0; y < height && !near; y += 4) {
+    const ci = im - toCss(y, height, cssHeight) * scale;
+    if (Math.abs(ci) <= 0.65) for (let x = 0; x < width; x += 4) if (insideDouble(xs[x], ci)) { near = true; break; }
+  }
+  if (!near) return undefined;
   const inside = new Uint8Array(width * height);
   let any = false, lastYield = performance.now();
   for (let y = 0; y < height; y++) {
@@ -539,7 +547,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // count, is estimated from the share of coarse samples left to them, or, after a pan, every one.
     let fresh = 0;
     for (let i = 0; i < pixels; i++) fresh += 1 - reused[i];
-    let expected = fresh;
+    let expected = fresh, insideSamples = 0;
     if (!pan) {
       // Coarse samples in the bulbs were not the GPU's: they stay out of its fine pass's statistics.
       let bounded = 0, left = 0, own = 0;
@@ -547,6 +555,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
         if (counts[i] < 0) left++;
         if (Number.isNaN(counts[i]) || bulbs?.[i]) continue;
         own++;
+        if (counts[i] === INSIDE) insideSamples++;
         if (counts[i] === INSIDE || isUnsettled(counts[i])) bounded++;
       }
       // The early interior test where enough coarse samples stayed bounded (after a pan: as the last whole render did).
@@ -570,7 +579,8 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // 0.3231+0.5529i (4.7e6) the render took 12 s instead of 13.5 s. Sent tile by tile in chunks, with
     // turns for the page between them: in one piece (2.3 million pixels near the period-3 bulb) it held
     // the main thread for 66 ms.
-    {
+    // Neither (a view of escaping pixels): no scan at all.
+    if (bulbs || insideSamples) {
       const inside = (x: number, y: number) => x >= width || y >= height || counts[y * width + x] === INSIDE;
       let chunk: number[] = [], lastYield = performance.now();
       for (const [x0, y0] of tiles) {
