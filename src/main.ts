@@ -22,7 +22,7 @@ import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.t
 import { isPalette } from './render/palette-names.ts';
 import type { Palette } from './render/palette-names.ts';
 import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
-import { needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
+import { DEEP_LOG_SCALE, needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
 import type { PixelRequest, PixelSamples, ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
 
@@ -231,6 +231,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
   if (!current() || !stage) return;
   const job = gpu!.job({ view: target.view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight, current });
   const started = performance.now(), logScale = target.view.logScale, physical = width / target.cssWidth;
+  // Shallow views (plain doubles on the workers, see createSampler): the workers settle bounded pixels
+  // cheaply there, proving interiors row by row (directRow), so the GPU leaves them every pixel its
+  // fine pass does not settle soon (see SHALLOW_DEFER_FROM), and every pixel they leave unresolved.
+  const shallow = logScale > DEEP_LOG_SCALE;
   const T = GPU_TILE;
   // Every tile, nearest the centre first.
   const tiles: [number, number][] = [];
@@ -368,9 +372,11 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
    * worker count).
    */
   const cpuRound = (expected: number) => {
-    // These are the costly pixels (proofs, budget-long orbits): counted as blocks of 32, so even a
-    // few thousand get every worker the reference memory allows.
-    activeWorkerCount = renderWorkerCount(workerLimit, expected * 32, logScale, iterations);
+    // These are the costly pixels (proofs, budget-long orbits): counted as blocks of 32 when deep, so
+    // even a few thousand get every worker the reference memory allows, and of 2048 when shallow (no
+    // reference to copy), so even a few hundred get every worker: a final raise's 423 pixels at 65536
+    // once ran on 2 of 8 workers.
+    activeWorkerCount = renderWorkerCount(workerLimit, expected * (shallow ? 2048 : 32), logScale, iterations);
     canvas.dataset.workers = String(activeWorkerCount);
     while (workers.length < activeWorkerCount) createWorker();
     const unresolved: number[] = [], round = ++gpuRounds, shared = planReference(target.view, iterations);
@@ -404,9 +410,12 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
         if (!list.length || !current()) return;
         cpuPixels += list.length;
         canvas.dataset.cpuPixels = String(cpuPixels);
-        // Dealt round-robin (the list runs from the centre out), so every worker starts near the centre.
-        const shares = Array.from({ length: activeWorkerCount }, (_, w) => new Uint32Array(Math.ceil(Math.max(0, list.length - w) / activeWorkerCount)));
-        list.forEach((i, k) => { shares[k % activeWorkerCount][Math.floor(k / activeWorkerCount)] = i; });
+        // Dealt round-robin in runs of DEAL_RUN (the list runs from the centre out), so every worker starts
+        // near the centre, with neighbouring pixels together (see DEAL_RUN).
+        const n = activeWorkerCount, sizes = new Array<number>(n).fill(0);
+        for (let k = 0; k < list.length; k += DEAL_RUN) sizes[(k / DEAL_RUN) % n] += Math.min(DEAL_RUN, list.length - k);
+        const shares = sizes.map(size => new Uint32Array(size)), filled = new Array<number>(n).fill(0);
+        list.forEach((i, k) => { const w = Math.floor(k / DEAL_RUN) % n; shares[w][filled[w]++] = i; });
         shares.forEach((share, workerIndex) => {
           if (!share.length) return;
           requests++;
@@ -480,6 +489,20 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // 2. Every other pixel (the coarse samples are done, at this budget).
     const mask = new Uint8Array(pixels);
     for (let i = 0; i < pixels; i++) mask[i] = reused[i] || !Number.isNaN(counts[i]) ? 0 : 1;
+    // Interior blocks: pixels whose block's four corner coarse samples the GPU found INSIDE. The workers
+    // prove such pixels anyway (INSIDE is only the GPU's guess), so they get them before the fine pass,
+    // which leaves them out; any that escape after all, they colour exactly. At 0.3231+0.5529i (4.7e6)
+    // the render took 12 s instead of 13.5 s.
+    let direct: Uint32Array | undefined;
+    if (!pan) {
+      const inside = (x: number, y: number) => x >= width || y >= height || counts[y * width + x] === INSIDE;
+      direct = collect(1, i => {
+        if (!mask[i]) return false;
+        const x = i % width, y = (i - x) / width, bx = x & ~3, by = y & ~3;
+        return inside(bx, by) && inside(bx + 4, by) && inside(bx, by + 4) && inside(bx + 4, by + 4);
+      });
+      for (const i of direct) mask[i] = 0;
+    }
     await yieldToEvents();
     if (!current()) return;
     runs++;
@@ -498,7 +521,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       gpuEarly = bounded > EARLY_SHARE * computed;
       // The fine pass's cap (see DEFER_SHARE): what all but the slowest coarse samples took, escaped or not.
       gpuCap = 1;
-      if (iterations >= DEFER_FROM) {
+      if (iterations >= (shallow ? SHALLOW_DEFER_FROM : DEFER_FROM)) {
         const steps = new Float32Array(computed);
         let at = 0;
         for (let i = 0; i < pixels; i++) if (!Number.isNaN(counts[i])) steps[at++] = counts[i] >= 0 ? counts[i] : distances[i];
@@ -509,12 +532,14 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       expected = Math.ceil(fresh * left / Math.max(1, computed));
     }
     open = cpuRound(expected);
+    if (direct?.length) open.send(direct);
     // Every tile of a whole render is staged here, even one with only coarse samples left (the 1x1 corner
     // tile when both sides are 64n + 1): staging makes its samples final or leaves them to the workers.
     // After a pan only the tiles with pixels to compute (there was no coarse pass).
     // At a large budget, a capped one first (see DEFER_SHARE), then the pixels it left unsettled as a list.
     const capped = Math.ceil(iterations * gpuCap);
-    deferred = capped < iterations ? [] : undefined;
+    // Shallow: what the capped pass leaves unsettled goes to the workers with the rest (deferred unset).
+    deferred = capped < iterations && !shallow ? [] : undefined;
     if (!await run(capped, 1, pan ? tiles.filter(tile => within(mask, tile, 1)) : tiles, mask, stageFine, gpuEarly)) return failed();
     const rest = deferred && Uint32Array.from(deferred);
     deferred = undefined;
@@ -546,7 +571,8 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (!await gpuOrbit(job, id, target, iterations)) return failed();
       runs++;
       open = cpuRound(unresolved.length);
-      if (!await runList(iterations, Uint32Array.from(unresolved), true, stageList)) return failed();
+      if (shallow) { left.push(Uint32Array.from(unresolved)); lefts += unresolved.length; }
+      else if (!await runList(iterations, Uint32Array.from(unresolved), true, stageList)) return failed();
     }
     if (!current()) return;
     target.iterations = iterations;
@@ -811,6 +837,13 @@ const PREVIEW_ITERATIONS = 4096;
  */
 const LEFT_CHUNK = 1024;
 /**
+ * The workers get the pixels left them in runs of this many from the list (half a GPU tile's row),
+ * not one by one. A worker proves interiors fastest among neighbouring pixels (the cycle a row proved
+ * is the next pixel's hint, see directRow): dealt one by one to 8 workers, each got every 8th pixel,
+ * and a shallow interior pixel cost it 3-5 times as much.
+ */
+const DEAL_RUN = 32;
+/**
  * A whole render's fine pass runs the GPU kernel with the early interior test when more than this
  * share of its coarse samples stayed bounded (see GpuPass.early).
  */
@@ -825,6 +858,13 @@ const EARLY_SHARE = 0.01;
  * eighth mixed more pixels that escape soon after it into the list, which ran slower for it.
  */
 const DEFER_SHARE = 0.1, DEFER_FROM = 32768;
+/**
+ * Shallow views cap their fine pass from this budget on, and the workers get what it leaves unsettled
+ * rather than a list pass: they settle it cheaply (see gpuRender's `shallow`). Uncapped, near the
+ * period-3 bulb at 300x (budget 24576), the few pixels that ran the whole budget held the fine pass
+ * for 650 ms while the workers waited for it.
+ */
+const SHALLOW_DEFER_FROM = 8192;
 /** The last whole render's fine-pass cap, as a share of its budget (after a pan, used again). */
 let gpuCap = 1;
 /** Whether the last whole GPU render's fine pass did: a pan's does as well. */

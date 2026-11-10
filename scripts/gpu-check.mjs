@@ -45,6 +45,9 @@ const VIEWS = [
   { name: 'spirals at -0.6776+0.4316i, 1.9e10', hash: 're=-0.6775690432191032&im=0.4316456926549795&zoom=1.927355912e10', most: 0.01 },
   { name: 'minibrot at -1.2507+0.0201i, 5e4', hash: 're=-1.25066&im=0.02012&zoom=5e4', most: 0.01 },
   { name: 'seahorse valley at -0.745+0.113i, 1000', hash: 're=-0.745&im=0.113&zoom=1000', most: 0.01 },
+  // Shallow and mostly interior: the workers prove nearly every pixel, the GPU's fine pass is capped and
+  // leaves them what it does not settle, and their unresolved pixels skip the GPU at each raise.
+  { name: 'period-3 bulb at -0.125+0.6495i, 300', hash: 're=-0.125&im=0.6495&zoom=300', most: 0.01 },
   // The edge of a period-4 bulb, mostly interior, where the GPU's guesses once stopped the budget at
   // 24576 (the workers alone reach 98304). Its escaping pixels are chaotic: their exact counts vary by
   // ~1700 within 1e-5 pixel, so more of them differ (3.5%) though neither renderer is the more exact.
