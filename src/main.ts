@@ -302,6 +302,12 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     const words = new Uint32Array(columns * rows), tileCounts = new Float32Array(columns * rows), levels = new Uint8Array(columns * rows);
     for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
       const i = (y + row * step) * width + x + column * step, k = row * columns + column;
+      // Samples the GPU left unsettled (unresolved, suspect, glitched) are not interior, only not settled
+      // yet: left transparent (their kept samples unknown), so the projected old image shows through until
+      // a later pass or the workers settle them. Painted black, they blacked out the canvas while zooming
+      // in deep views: previews stop at 4096 steps (0.80-1.00 of it at -0.5807+0.6518i, 6e23, where pixels
+      // escape after up to 57344 steps; spirals at 1.9e10 the same).
+      if (counts[i] < 0 && counts[i] !== INSIDE && counts[i] !== PROVEN) { tileCounts[k] = NaN; levels[k] = 255; continue; }
       tileCounts[k] = counts[i] >= 0 ? counts[i] : -1; levels[k] = level(i);
       words[k] = colour(tileCounts[k], decodeDistance(levels[k]));
     }
@@ -309,7 +315,8 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       pixels: new Uint8ClampedArray(words.buffer), counts: tileCounts, distances: levels, palette };
     keepSamples(tile, stage!.add(tile, quality));
   };
-  // Final pixels (escaped, or proved) at quality 1; those left to the workers black at quality 2.
+  // Final pixels (escaped, or proved) at quality 1; those left to the workers that the GPU took for interior
+  // black at quality 2, and the others (unsettled) not at all until the workers' results.
   // The pixels left to the workers, row by row per tile as each tile is staged, until sent (see cpuRound).
   let left: Uint32Array[] = [], lefts = 0;
   // While a fine pass runs at a capped budget (see DEFER_SHARE): its unsettled pixels, for a list pass at the full one.
@@ -324,8 +331,10 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       if (reused[i] || Number.isNaN(count)) continue;
       levels[k] = level(i);
       words[k] = colour(count >= 0 ? count : -1, decodeDistance(levels[k]));
-      claims[k] = count >= 0 || count === PROVEN ? 1 : 2;
-      if (claims[k] === 2) {
+      // Unsettled pixels (see stageCoarse) are not painted: what is under them stays until the workers' result.
+      const final = count >= 0 || count === PROVEN;
+      claims[k] = final ? 1 : count === INSIDE ? 2 : 0;
+      if (!final) {
         if (deferred && isUnsettled(count)) deferred.push(i);
         else tileLeft[tileLefts++] = i;
       }
