@@ -6,7 +6,7 @@
  * staged and uploaded once per frame (render/tile-stage.ts). The info panel,
  * the view dialog and the zoom buttons live in ui/hud.ts.
  */
-import { initialView, transformView, viewOffset } from './math/precision.ts';
+import { fixedToNumber, initialView, transformView, viewOffset } from './math/precision.ts';
 import type { Point, View } from './math/precision.ts';
 import { FINAL_RAISE_FRACTION, adaptBudget, chooseBudget, rememberUse } from './render/budget.ts';
 import type { BudgetMemory } from './render/budget.ts';
@@ -17,11 +17,12 @@ import { decodeDistance, encodeDistance } from './render/samples.ts';
 import { GPU_TILE, GpuRenderer, INSIDE, SUSPECT, UNRESOLVED, yieldToEvents } from './render/gpu-render.ts';
 import type { GpuJob } from './render/gpu-render.ts';
 import { computeOrbit } from './fractal/orbit.ts';
+import { insideDouble } from './fractal/direct.ts';
 import { stageSamples, TileStage } from './render/tile-stage.ts';
 import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
 import { isPalette } from './render/palette-names.ts';
 import type { Palette } from './render/palette-names.ts';
-import { renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
+import { dealRuns, renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
 import { DEEP_LOG_SCALE, needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
 import type { PixelRequest, PixelSamples, ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
@@ -188,6 +189,39 @@ function gpuFailed(reason: unknown): void {
 const usesGpu = (target: View) => !!gpu?.usable && GpuRenderer.serves(target);
 
 /**
+ * Which pixels lie in the main cardioid or the period-2 bulb, by the workers' own test (insideDouble)
+ * at each pixel's c in doubles; undefined where none do, or below BULB_LOG_SCALE. The GPU cannot tell
+ * them: near the parabolic points (-0.75, 0.25, -1.25) their cycles attract so slowly (|λ| close to 1)
+ * that it took them for unsettled, raised the budget to 24576 where the workers stay at 1536, and its
+ * fine pass ran 8 s where the workers alone take 0.3 s. A wrong guess costs only time: the workers
+ * compute every pixel they are given exactly.
+ */
+async function bulbPixels(target: Surface, width: number, height: number, current: () => boolean): Promise<Uint8Array | undefined> {
+  const { view, cssWidth, cssHeight } = target;
+  if (view.logScale < BULB_LOG_SCALE) return undefined;
+  const scale = 2 ** view.logScale, re = fixedToNumber(view.re, view.bits), im = fixedToNumber(view.im, view.bits);
+  const halfWidth = cssWidth / 2 * scale, halfHeight = cssHeight / 2 * scale;
+  // The bulbs lie within -1.25 <= re <= 0.25, |im| <= 0.65.
+  if (re + halfWidth < -1.25 || re - halfWidth > 0.25 || Math.abs(im) - halfHeight > 0.65) return undefined;
+  // As the workers map pixels to c (see worker.ts's toCss and createSampler).
+  const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
+  const xs = new Float64Array(width);
+  for (let x = 0; x < width; x++) xs[x] = re + toCss(x, width, cssWidth) * scale;
+  const inside = new Uint8Array(width * height);
+  let any = false, lastYield = performance.now();
+  for (let y = 0; y < height; y++) {
+    const ci = im - toCss(y, height, cssHeight) * scale;
+    if (Math.abs(ci) <= 0.65) for (let x = 0, i = y * width; x < width; x++, i++) if (insideDouble(xs[x], ci)) { inside[i] = 1; any = true; }
+    if (performance.now() - lastYield > MAIN_SLICE_MS) {
+      await yieldToEvents();
+      if (!current()) return undefined;
+      lastYield = performance.now();
+    }
+  }
+  return any ? inside : undefined;
+}
+
+/**
  * Give the job the orbit for `iterations`: the shared one (built by worker 0), or one at the view centre
  * for shallow views, computed here to `centre` iterations (a preview's capped budget: it is not kept).
  */
@@ -235,6 +269,8 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
   // cheaply there, proving interiors row by row (directRow), so the GPU leaves them every pixel its
   // fine pass does not settle soon (see SHALLOW_DEFER_FROM), and every pixel they leave unresolved.
   const shallow = logScale > DEEP_LOG_SCALE;
+  // Pixels in the main cardioid or the period-2 bulb (see bulbPixels), for the workers straight away.
+  let bulbs: Uint8Array | undefined;
   const T = GPU_TILE;
   // Every tile, nearest the centre first.
   const tiles: [number, number][] = [];
@@ -410,13 +446,9 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
         if (!list.length || !current()) return;
         cpuPixels += list.length;
         canvas.dataset.cpuPixels = String(cpuPixels);
-        // Dealt round-robin in runs of DEAL_RUN (the list runs from the centre out), so every worker starts
-        // near the centre, with neighbouring pixels together (see DEAL_RUN).
-        const n = activeWorkerCount, sizes = new Array<number>(n).fill(0);
-        for (let k = 0; k < list.length; k += DEAL_RUN) sizes[(k / DEAL_RUN) % n] += Math.min(DEAL_RUN, list.length - k);
-        const shares = sizes.map(size => new Uint32Array(size)), filled = new Array<number>(n).fill(0);
-        list.forEach((i, k) => { const w = Math.floor(k / DEAL_RUN) % n; shares[w][filled[w]++] = i; });
-        shares.forEach((share, workerIndex) => {
+        // Dealt round-robin in runs (the list runs from the centre out), so every worker starts near the
+        // centre, with neighbouring pixels together (see DEAL_RUN).
+        dealRuns(list, activeWorkerCount, DEAL_RUN).forEach((share, workerIndex) => {
           if (!share.length) return;
           requests++;
           workers[workerIndex].postMessage({ type: 'pixels', id, view: target.view, width, height, cssWidth: target.cssWidth, cssHeight: target.cssHeight,
@@ -449,12 +481,23 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       return;
     }
     if (!await gpuOrbit(job, id, target, iterations)) return failed();
+    bulbs = await bulbPixels(target, width, height, current);
+    if (!current()) return;
     // 1. Coarse pass (whole renders only: after a pan most of the view is there already). Its unsettled
     // samples are cheap to compute again here, so the budget rises as the workers' coarse pass raises it
     // for cheap ones: whenever adaptBudget calls for it.
     if (!pan) {
       runs++;
-      if (!await run(iterations, 4, tiles, undefined, stageCoarse)) return failed();
+      // Coarse samples in the bulbs are interior already (the workers prove them at once): staged as
+      // such, they do not raise the budget either.
+      let coarseMask: Uint8Array | undefined;
+      if (bulbs) {
+        coarseMask = new Uint8Array(pixels);
+        for (let y = 0; y < height; y += 4) for (let x = 0, i = y * width; x < width; x += 4, i += 4) {
+          if (bulbs[i]) store(i, INSIDE, 0); else coarseMask[i] = 1;
+        }
+      }
+      if (!await run(iterations, 4, tiles, coarseMask, stageCoarse)) return failed();
       canvas.dataset.gpuFirstMs = String(Math.round(performance.now() - started));
       coarseReady = true;
       completedStep = 4;
@@ -489,20 +532,6 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // 2. Every other pixel (the coarse samples are done, at this budget).
     const mask = new Uint8Array(pixels);
     for (let i = 0; i < pixels; i++) mask[i] = reused[i] || !Number.isNaN(counts[i]) ? 0 : 1;
-    // Interior blocks: pixels whose block's four corner coarse samples the GPU found INSIDE. The workers
-    // prove such pixels anyway (INSIDE is only the GPU's guess), so they get them before the fine pass,
-    // which leaves them out; any that escape after all, they colour exactly. At 0.3231+0.5529i (4.7e6)
-    // the render took 12 s instead of 13.5 s.
-    let direct: Uint32Array | undefined;
-    if (!pan) {
-      const inside = (x: number, y: number) => x >= width || y >= height || counts[y * width + x] === INSIDE;
-      direct = collect(1, i => {
-        if (!mask[i]) return false;
-        const x = i % width, y = (i - x) / width, bx = x & ~3, by = y & ~3;
-        return inside(bx, by) && inside(bx + 4, by) && inside(bx, by + 4) && inside(bx + 4, by + 4);
-      });
-      for (const i of direct) mask[i] = 0;
-    }
     await yieldToEvents();
     if (!current()) return;
     runs++;
@@ -512,19 +541,22 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     for (let i = 0; i < pixels; i++) fresh += 1 - reused[i];
     let expected = fresh;
     if (!pan) {
-      let bounded = 0, left = 0;
+      // Coarse samples in the bulbs were not the GPU's: they stay out of its fine pass's statistics.
+      let bounded = 0, left = 0, own = 0;
       for (let i = 0; i < pixels; i++) {
-        if (counts[i] === INSIDE || isUnsettled(counts[i])) bounded++;
         if (counts[i] < 0) left++;
+        if (Number.isNaN(counts[i]) || bulbs?.[i]) continue;
+        own++;
+        if (counts[i] === INSIDE || isUnsettled(counts[i])) bounded++;
       }
       // The early interior test where enough coarse samples stayed bounded (after a pan: as the last whole render did).
-      gpuEarly = bounded > EARLY_SHARE * computed;
+      gpuEarly = bounded > EARLY_SHARE * own;
       // The fine pass's cap (see DEFER_SHARE): what all but the slowest coarse samples took, escaped or not.
       gpuCap = 1;
-      if (iterations >= (shallow ? SHALLOW_DEFER_FROM : DEFER_FROM)) {
-        const steps = new Float32Array(computed);
+      if (own && iterations >= (shallow ? SHALLOW_DEFER_FROM : DEFER_FROM)) {
+        const steps = new Float32Array(own);
         let at = 0;
-        for (let i = 0; i < pixels; i++) if (!Number.isNaN(counts[i])) steps[at++] = counts[i] >= 0 ? counts[i] : distances[i];
+        for (let i = 0; i < pixels; i++) if (!Number.isNaN(counts[i]) && !bulbs?.[i]) steps[at++] = counts[i] >= 0 ? counts[i] : distances[i];
         steps.sort();
         const cap = Math.max(steps[Math.floor((1 - DEFER_SHARE) * (at - 1))] ?? iterations, iterations / 8);
         if (cap <= iterations / 2) gpuCap = cap / iterations;
@@ -532,7 +564,34 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
       expected = Math.ceil(fresh * left / Math.max(1, computed));
     }
     open = cpuRound(expected);
-    if (direct?.length) open.send(direct);
+    // The workers get some pixels before the fine pass, which leaves them out: those in the bulbs, and
+    // interior blocks, whose four corner coarse samples the GPU found INSIDE. The workers prove such
+    // pixels anyway (INSIDE is only the GPU's guess), and colour exactly any that escape after all. At
+    // 0.3231+0.5529i (4.7e6) the render took 12 s instead of 13.5 s. Sent tile by tile in chunks, with
+    // turns for the page between them: in one piece (2.3 million pixels near the period-3 bulb) it held
+    // the main thread for 66 ms.
+    {
+      const inside = (x: number, y: number) => x >= width || y >= height || counts[y * width + x] === INSIDE;
+      let chunk: number[] = [], lastYield = performance.now();
+      for (const [x0, y0] of tiles) {
+        for (let y = y0; y < Math.min(height, y0 + T); y++) for (let x = x0; x < Math.min(width, x0 + T); x++) {
+          const i = y * width + x;
+          if (!mask[i]) continue;
+          const bx = x & ~3, by = y & ~3;
+          if (bulbs?.[i] || (!pan && inside(bx, by) && inside(bx + 4, by) && inside(bx, by + 4) && inside(bx + 4, by + 4))) {
+            mask[i] = 0;
+            chunk.push(i);
+          }
+        }
+        if (chunk.length >= DIRECT_CHUNK) { open.send(Uint32Array.from(chunk)); chunk = []; }
+        if (performance.now() - lastYield > MAIN_SLICE_MS) {
+          await yieldToEvents();
+          if (!current()) return;
+          lastYield = performance.now();
+        }
+      }
+      if (chunk.length) open.send(Uint32Array.from(chunk));
+    }
     // Every tile of a whole render is staged here, even one with only coarse samples left (the 1x1 corner
     // tile when both sides are 64n + 1): staging makes its samples final or leaves them to the workers.
     // After a pan only the tiles with pixels to compute (there was no coarse pass).
@@ -843,6 +902,15 @@ const LEFT_CHUNK = 1024;
  * and a shallow interior pixel cost it 3-5 times as much.
  */
 const DEAL_RUN = 32;
+/** Pixels sent to the workers before a fine pass (see gpuRender) go in chunks of about this many. */
+const DIRECT_CHUNK = 65536;
+/** Main-thread loops over every pixel give the page a turn after this long. */
+const MAIN_SLICE_MS = 8;
+/**
+ * Pixels are checked against the bulbs (see bulbPixels) down to this scale: below it a pixel's c in
+ * doubles is too coarse to tell, and whole views would be taken for interior.
+ */
+const BULB_LOG_SCALE = -40;
 /**
  * A whole render's fine pass runs the GPU kernel with the early interior test when more than this
  * share of its coarse samples stayed bounded (see GpuPass.early).

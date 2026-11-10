@@ -62,7 +62,7 @@ export function directDouble(cr: number, ci: number, limit: number, pixel = 1): 
 }
 
 /** Main cardioid or period-2 bulb, exactly as directDouble tests it. */
-function insideDouble(cr: number, ci: number): boolean {
+export function insideDouble(cr: number, ci: number): boolean {
   const q = (cr - 0.25) ** 2 + ci * ci;
   return q * (q + cr - 0.25) <= 0.25 * ci * ci || (cr + 1) ** 2 + ci * ci <= 1 / 16;
 }

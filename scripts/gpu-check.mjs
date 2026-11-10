@@ -48,6 +48,9 @@ const VIEWS = [
   // Shallow and mostly interior: the workers prove nearly every pixel, the GPU's fine pass is capped and
   // leaves them what it does not settle, and their unresolved pixels skip the GPU at each raise.
   { name: 'period-3 bulb at -0.125+0.6495i, 300', hash: 're=-0.125&im=0.6495&zoom=300', most: 0.01 },
+  // The neck between the main cardioid and the period-2 bulb: the GPU leaves the bulbs' pixels to the
+  // workers before it starts (it once took them for unsettled and raised the budget to 24576).
+  { name: 'cardioid neck at -0.75+0.0001i, 2e4', hash: 're=-0.75&im=0.0001&zoom=20000', most: 0.01 },
   // The edge of a period-4 bulb, mostly interior, where the GPU's guesses once stopped the budget at
   // 24576 (the workers alone reach 98304). Its escaping pixels are chaotic: their exact counts vary by
   // ~1700 within 1e-5 pixel, so more of them differ (3.5%) though neither renderer is the more exact.
