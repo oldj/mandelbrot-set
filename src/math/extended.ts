@@ -37,13 +37,22 @@ export function multiply(a: Extended, b: Extended): Extended {
 
 /** Fused operations normalize once instead of allocating each intermediate product. */
 export function linear(a: Extended, z: Extended, b: Extended, c: Extended): Extended {
-  if ((a.re === 0 && a.im === 0) || (z.re === 0 && z.im === 0)) return multiply(b, c);
-  if ((b.re === 0 && b.im === 0) || (c.re === 0 && c.im === 0)) return multiply(a, z);
-  const az = a.exp + z.exp, bc = b.exp + c.exp;
+  return linearParts(a.re, a.im, a.exp, z, b.re, b.im, b.exp, c);
+}
+
+/** a z + b c with a and b read from `table` at `offset`: a (re, im, exp), then b (re, im, exp). */
+export function linearAt(table: Float64Array, offset: number, z: Extended, c: Extended): Extended {
+  return linearParts(table[offset], table[offset + 1], table[offset + 2], z, table[offset + 3], table[offset + 4], table[offset + 5], c);
+}
+
+function linearParts(ar: number, ai: number, ae: number, z: Extended, br: number, bi: number, be: number, c: Extended): Extended {
+  if ((ar === 0 && ai === 0) || (z.re === 0 && z.im === 0)) return extended(br * c.re - bi * c.im, br * c.im + bi * c.re, be + c.exp);
+  if ((br === 0 && bi === 0) || (c.re === 0 && c.im === 0)) return extended(ar * z.re - ai * z.im, ar * z.im + ai * z.re, ae + z.exp);
+  const az = ae + z.exp, bc = be + c.exp;
   const exp = Math.max(az, bc);
   const s = 2 ** (az - exp), t = 2 ** (bc - exp);
-  return extended((a.re * z.re - a.im * z.im) * s + (b.re * c.re - b.im * c.im) * t,
-    (a.re * z.im + a.im * z.re) * s + (b.re * c.im + b.im * c.re) * t, exp);
+  return extended((ar * z.re - ai * z.im) * s + (br * c.re - bi * c.im) * t,
+    (ar * z.im + ai * z.re) * s + (br * c.im + bi * c.re) * t, exp);
 }
 
 export function perturbStep(reference: Extended, delta: Extended, dc: Extended): Extended {

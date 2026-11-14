@@ -887,7 +887,7 @@ test('after a pan, unresolved pixels lead to a full render instead of deepening 
 });
 
 test('deepening that needs a longer reference than the workers can share renders again with fewer workers', () => {
-  // Below 2^-800 each worker's reference tables take ~768 bytes per iteration: at 4x the budget fewer workers fit.
+  // Below 2^-800 each worker's reference tables take ~336 bytes per iteration: at 4x the budget fewer workers fit.
   const h = harness({ cores: 9, hash: '#re=-1.75&im=0&zoom=1e300' });
   const first = h.request();
   assert.ok(first.reference && first.workerCount > 1, `a deep render with ${first.workerCount} workers`);

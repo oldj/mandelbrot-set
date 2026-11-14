@@ -43,6 +43,13 @@ function bla(a: Extended, b: Extended, logRadius: number, length: number): BLA {
 
 /** Native BLA tables: per level, six doubles per block: A (re, im), B (re, im), radius², radius. */
 export const NATIVE_FIELDS = 6;
+/**
+ * Extended BLA tables: per level, seven doubles per block: A (re, im, exp),
+ * B (re, im, exp), log2 radius (-Infinity: unusable). Flat arrays rather than
+ * BLA objects: a fifth of the memory (each object held two Extended objects
+ * and boxed doubles), so deep views can keep more workers (see worker-policy.ts).
+ */
+export const EXTENDED_FIELDS = 7;
 
 /** A reference orbit in doubles with its BLA tables, as each worker uses it. */
 export interface Reference {
@@ -68,7 +75,8 @@ export interface Reference {
   orbit?: Extended[];
   /** log2 |Z_m| for the extended orbit: the kernel compares against it every step. */
   orbitLog?: Float64Array;
-  levels?: (BLA | undefined)[][];
+  /** Level L holds blocks of 2^L steps starting at orbit index 1 + j 2^L, EXTENDED_FIELDS doubles each. */
+  levels?: Float64Array[];
 }
 
 /** Called periodically so stale jobs can be cancelled without restarting workers. */
@@ -118,6 +126,17 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
     });
     return table;
   };
+  const storeExtended = (blocks: (BLA | undefined)[]) => {
+    const table = new Float64Array(blocks.length * EXTENDED_FIELDS);
+    blocks.forEach((block, i) => {
+      const o = i * EXTENDED_FIELDS;
+      if (!block) { table[o + 6] = -Infinity; return; }
+      table[o] = block.a.re; table[o + 1] = block.a.im; table[o + 2] = block.a.exp;
+      table[o + 3] = block.b.re; table[o + 4] = block.b.im; table[o + 5] = block.b.exp;
+      table[o + 6] = block.logRadius;
+    });
+    return table;
+  };
   const first: BLA[] = [];
   // Start at reference index 1: index 0 is a nonlinear step (Z_0 = 0).
   for (let m = 1; m + 1 < length; m++) {
@@ -126,7 +145,7 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
     first.push(bla(a, ONE, logRadius, 1));
   }
   const native = [store(first)];
-  const levels: (BLA | undefined)[][] | undefined = extended ? [first] : undefined;
+  const levels = extended ? [storeExtended(first)] : undefined;
   let last: (BLA | undefined)[] = first;
   while (last.length > 1) {
     const level: (BLA | undefined)[] = [];
@@ -139,7 +158,7 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
       if (i % 512 === 0) await checkpoint();
     }
     native.push(store(level));
-    levels?.push(level);
+    levels?.push(storeExtended(level));
     last = level;
   }
   const firstRadiusSquared = new Float64Array(length);
@@ -159,16 +178,15 @@ export async function buildReference(view: View, limit: number, logDeltaRadius: 
     view.logScale <= EXTENDED_LOG_SCALE + 100);
 }
 
-/** Extended-exponent BLA lookup: the longest usable block at m, if any. */
-export function lookupExtended(reference: Reference, m: number, logDelta: number, remaining: number): BLA | undefined {
-  if (m === 0) return undefined;
-  const index = m - 1;
-  let selected: BLA | undefined;
-  const levels = reference.levels!;
-  for (let level = 0, stride = 1; level < levels.length && index % stride === 0; level++, stride *= 2) {
-    const candidate = levels[level][index / stride];
-    if (!candidate || candidate.length > remaining || !(logDelta < candidate.logRadius)) break;
-    selected = candidate;
+/** Extended-exponent BLA lookup: the longest usable block level at m (2^level steps), or -1. */
+export function lookupExtended(reference: Reference, m: number, logDelta: number, remaining: number): number {
+  if (m === 0) return -1;
+  const index = m - 1, tables = reference.levels!;
+  let selected = -1;
+  for (let level = 0, stride = 1; level < tables.length && index % stride === 0; level++, stride *= 2) {
+    const table = tables[level], offset = (index / stride) * EXTENDED_FIELDS;
+    if (offset >= table.length || stride > remaining || !(logDelta < table[offset + 6])) break;
+    selected = level;
   }
   return selected;
 }

@@ -15,10 +15,11 @@ const REFERENCE_MEMORY = 192 * 1024 * 1024;
 
 /**
  * Per worker and orbit step: native BLA tables in typed arrays plus the
- * orbit (~160 B); below 2^-800 the extended-exponent object tables (~768 B).
+ * orbit (~160 B); below 2^-800 also the extended-exponent tables (flat
+ * arrays) and the orbit as Extended objects (~336 B; measured in Node 24).
  */
 export function referenceBytesPerIteration(logScale: number): number {
-  return logScale <= -800 ? 768 : 160;
+  return logScale <= -800 ? 336 : 160;
 }
 
 export function renderWorkerCount(capacity: number, pixels: number, logScale: number, iterations: number): number {

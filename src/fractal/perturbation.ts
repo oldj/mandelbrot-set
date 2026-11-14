@@ -6,14 +6,14 @@
  * perturbExtended carries a separate exponent below that, and runs in doubles
  * wherever δ (and a proof's radii) are back inside double range.
  */
-import { add, extended, linear, logAdd, logMagnitude, magnitude, perturbStep, ZERO } from '../math/extended.ts';
+import { add, extended, linearAt, logAdd, logMagnitude, magnitude, perturbStep, ZERO } from '../math/extended.ts';
 import type { Extended } from '../math/extended.ts';
 import { escapeDistance, INTERIOR, lastSample, smooth } from './escape.ts';
 import {
   attractingCycle, attractingCycleExtended, LOG_ROUNDING, LOG_SLACK, NEWTON_BAND, NEWTON_COST, NEWTON_PASSES, NEWTON_RETURN_SQUARED, PROOF_START,
   provedExtendedCycle, ROUNDING, SQRT2, TINY_SQUARE, TRAP_BAND, TRAP_RETURN_SQUARED,
 } from './interior.ts';
-import { lookupExtended, lookupNative, NATIVE_FIELDS } from './orbit.ts';
+import { EXTENDED_FIELDS, lookupExtended, lookupNative, NATIVE_FIELDS } from './orbit.ts';
 import type { Reference } from './orbit.ts';
 
 /** Per-sampler counters: BigInt fallbacks, iterations skipped by BLA, samples left unresolved at the budget. */
@@ -383,12 +383,13 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
     }
     if (!stepped) {
       steps++;
-      const block = verify ? undefined : lookupExtended(reference, m, logDelta, limit - n);
-      if (block) {
-        const derivative = linear(block.a, { re: er, im: ei, exp: eExp }, block.b, pixel);
+      const level = verify ? -1 : lookupExtended(reference, m, logDelta, limit - n);
+      if (level >= 0) {
+        const table = reference.levels![level], o = ((m - 1) >> level) * EXTENDED_FIELDS, length = 1 << level;
+        const derivative = linearAt(table, o, { re: er, im: ei, exp: eExp }, pixel);
         er = derivative.re; ei = derivative.im; eExp = derivative.exp; lift = 2 ** (logPixel - eExp);
-        delta = linear(block.a, delta, block.b, dc);
-        m += block.length; n += block.length; stats.skipped += block.length - 1;
+        delta = linearAt(table, o, delta, dc);
+        m += length; n += length; stats.skipped += length - 1;
       } else {
         if (verify) {
           const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];

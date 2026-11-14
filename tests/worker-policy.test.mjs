@@ -12,7 +12,9 @@ test('small updates use fewer workers and long references limit duplicated memor
   assert.equal(renderWorkerCount(8, 1280 * 720, -8, 1024), 8);
   assert.equal(renderWorkerCount(8, 3000, -8, 1024), 1);
   assert.equal(renderWorkerCount(8, 65536, -165, 6144), 8);
-  assert.equal(renderWorkerCount(8, 1280 * 720, -2000, 65536), 4);
+  // Extended references fit 8 workers at 65536 iterations; at 4x that only 2.
+  assert.equal(renderWorkerCount(8, 1280 * 720, -2000, 65536), 8);
+  assert.equal(renderWorkerCount(8, 1280 * 720, -2000, 262144), 2);
   // Native-depth references are compact: a raised budget keeps every worker.
   assert.equal(renderWorkerCount(8, 1280 * 720, -60, 163840), 7);
   assert.equal(renderWorkerCount(8, 1280 * 720, -100, 65536), 8);
