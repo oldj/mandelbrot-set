@@ -6,7 +6,7 @@
  * never affected. perturbNative tracks returns of its orbit and decides when
  * to try them; directRow does the same for shallow views.
  */
-import { add, extended, logAdd, logMagnitude, magnitude, multiply, ONE, perturbStep, ZERO } from '../math/extended.ts';
+import { add, addAt, extended, logAdd, logMagnitude, magnitude, multiply, ONE, perturbStepAt, ZERO } from '../math/extended.ts';
 import type { Extended } from '../math/extended.ts';
 import type { Reference } from './orbit.ts';
 
@@ -280,9 +280,9 @@ export const provedExtendedCycle = { found: false, m: 0, s: ZERO as Extended, pe
  */
 export function attractingCycleExtended(reference: Reference, m0: number, s: Extended, dc: Extended, logDc: number,
   period: number, passes = NEWTON_PASSES): number {
-  const orbit = reference.orbit!, orbitLog = reference.orbitLog!, end = orbit.length - 1;
+  const orbit = reference.points, orbitLog = reference.orbitLog!, end = orbit.re.length - 1;
   // At the orbit's last point there is no next step: the same w, rebased to the start.
-  if (m0 === end) { s = add(orbit[m0], s); m0 = 0; }
+  if (m0 === end) { s = addAt(orbit, m0, s); m0 = 0; }
   const logRadii = [0, 0, 0, 0];
   let spent = 0, logRadius0 = -Infinity, previousStep = Infinity;
   for (let pass = 0; pass < passes; pass++) {
@@ -290,7 +290,7 @@ export function attractingCycleExtended(reference: Reference, m0: number, s: Ext
     // after the first pass, bounds on the images of D(w, r) for four radii
     // (r, 16 r, 256 r, 4096 r), each step r -> r (2|z| + r) plus rounding.
     const check = pass > 0;
-    const startTotal = add(orbit[m0], s);
+    const startTotal = addAt(orbit, m0, s);
     const startError = LOG_ROUNDING + logAdd(orbitLog[m0], logMagnitude(s));
     for (let i = 0; i < 4; i++) logRadii[i] = logRadius0 + 4 * i;
     let m = m0, delta = s, logDelta = logMagnitude(s), derivative = ONE;
@@ -305,9 +305,9 @@ export function attractingCycleExtended(reference: Reference, m0: number, s: Ext
       }
       const product = multiply(total, derivative);
       derivative = { re: product.re, im: product.im, exp: product.exp + 1 };
-      delta = perturbStep(orbit[m], delta, dc);
+      delta = perturbStepAt(orbit, m, delta, dc);
       m++;
-      total = add(orbit[m], delta); logTotal = logMagnitude(total); logDelta = logMagnitude(delta);
+      total = addAt(orbit, m, delta); logTotal = logMagnitude(total); logDelta = logMagnitude(delta);
       if (!(logTotal <= 4)) return spent + k;
       if (logTotal < logDelta || m === end) {
         // Representing z as Z + δ rounds once more; rebasing makes that the new state.

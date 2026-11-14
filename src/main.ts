@@ -17,6 +17,7 @@ import { decodeDistance, encodeDistance } from './render/samples.ts';
 import { GPU_TILE, GpuRenderer, INSIDE, SUSPECT, UNRESOLVED, yieldToEvents } from './render/gpu-render.ts';
 import type { GpuJob } from './render/gpu-render.ts';
 import { computeOrbit } from './fractal/orbit.ts';
+import type { Reference } from './fractal/orbit.ts';
 import { insideDouble } from './fractal/direct.ts';
 import { stageSamples, TileStage } from './render/tile-stage.ts';
 import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
@@ -75,12 +76,18 @@ function storedPalette(): Palette | undefined {
 }
 let palette: Palette = viewHashPalette(location.hash) ?? storedPalette() ?? 'classic';
 
-/** The one reference orbit deep renders share; worker 0 builds it, the rest receive copies. */
-interface SharedOrbit { key: number; spec: ReferenceSpec; orbit?: OrbitData }
+/**
+ * The one reference orbit deep renders share; worker 0 builds it, the rest receive copies. On a
+ * cross-origin isolated page worker 0 also builds its BLA tables, once, in shared memory, and the
+ * rest receive that copy (`tables`) rather than each building and holding their own.
+ */
+interface SharedOrbit { key: number; spec: ReferenceSpec; orbit?: OrbitData; tables?: Reference }
 let sharedOrbit: SharedOrbit | undefined;
 let referenceKeys = 0;
-/** The orbit key each worker already holds, so it is sent at most once per worker. */
+const shareTables = globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer === 'function';
+/** The orbit and table keys each worker already holds, so each is sent at most once per worker. */
 const workerOrbitKeys: (number | undefined)[] = [];
+const workerTableKeys: (number | undefined)[] = [];
 
 function planReference(target: View, iterations: number): SharedOrbit | undefined {
   if (!needsReference(target, cssWidth, cssHeight)) return undefined;
@@ -92,6 +99,18 @@ function planReference(target: View, iterations: number): SharedOrbit | undefine
 
 function referencePlan(shared: SharedOrbit, workerIndex: number): ReferencePlan {
   const plan: ReferencePlan = { key: shared.key, spec: shared.spec };
+  if (shareTables) {
+    if (workerTableKeys[workerIndex] === shared.key) return plan;
+    if (shared.tables) {
+      workerTableKeys[workerIndex] = shared.key;
+      return { ...plan, tables: shared.tables };
+    }
+    // Others wait for worker 0's tables; it builds them from its orbit, or from this one, or computes one first.
+    if (workerIndex !== 0) return { ...plan, share: true };
+    if (workerOrbitKeys[0] === shared.key || !shared.orbit) return { ...plan, share: true, build: true };
+    workerOrbitKeys[0] = shared.key;
+    return { ...plan, share: true, build: true, orbit: shared.orbit };
+  }
   if (workerOrbitKeys[workerIndex] === shared.key) return plan;
   if (shared.orbit) {
     workerOrbitKeys[workerIndex] = shared.key;
@@ -429,7 +448,7 @@ async function gpuRender(id: number, target: Surface, reused: Uint8Array, pan: b
     // even a few thousand get every worker the reference memory allows, and of 2048 when shallow (no
     // reference to copy), so even a few hundred get every worker: a final raise's 423 pixels at 65536
     // once ran on 2 of 8 workers.
-    activeWorkerCount = renderWorkerCount(workerLimit, expected * (shallow ? 2048 : 32), logScale, iterations);
+    activeWorkerCount = renderWorkerCount(workerLimit, expected * (shallow ? 2048 : 32), logScale, iterations, shareTables);
     canvas.dataset.workers = String(activeWorkerCount);
     while (workers.length < activeWorkerCount) createWorker();
     const unresolved: number[] = [], round = ++gpuRounds, shared = planReference(target.view, iterations);
@@ -838,7 +857,7 @@ function startRender(preview = false): void {
   canvas.dataset.reusedPixels = String(image.width * image.height - renderPixels);
   canvas.dataset.computePixels = String(renderPixels);
   renderPixelCount = renderPixels;
-  activeWorkerCount = renderWorkerCount(workerLimit, renderPixels, view.logScale, iterations);
+  activeWorkerCount = renderWorkerCount(workerLimit, renderPixels, view.logScale, iterations, shareTables);
   canvas.dataset.workers = String(activeWorkerCount);
   while (workers.length < activeWorkerCount) createWorker();
   const shared = renderPixels ? planReference(surface.view, iterations) : undefined;
@@ -1000,7 +1019,7 @@ function settle(): void {
     // longer reference may call for fewer workers (each holds its tables): in
     // both cases render the whole surface again at the raised budget instead.
     const whole = renderPixelCount === surface!.canvas.width * surface!.canvas.height;
-    if (!whole || renderWorkerCount(workerLimit, renderPixelCount, renderBase.view.logScale, iterations) < activeWorkerCount) {
+    if (!whole || renderWorkerCount(workerLimit, renderPixelCount, renderBase.view.logScale, iterations, shareTables) < activeWorkerCount) {
       startRender();
       return;
     }
@@ -1035,12 +1054,27 @@ function createWorker(): void {
       if (sharedOrbit?.key !== data.key) return;
       sharedOrbit.orbit = data.orbit;
       orbitWaiters = orbitWaiters.filter(waiter => waiter.key !== data.key || (waiter.resolve(), false));
+      // With shared tables the other workers need only those (tables, below), not the orbit.
+      if (shareTables) { workerOrbitKeys[workers.indexOf(worker)] = data.key; return; }
       workers.forEach((other, workerIndex) => {
         if (workerOrbitKeys[workerIndex] === data.key) return;
         if (other === worker) { workerOrbitKeys[workerIndex] = data.key; return; }
         if (workerIndex >= activeWorkerCount) return;
         workerOrbitKeys[workerIndex] = data.key;
         other.postMessage({ type: 'reference', key: data.key, spec: sharedOrbit!.spec, orbit: data.orbit });
+      });
+      return;
+    }
+    if (data.type === 'tables') {
+      // Shared memory: passing the tables on copies nothing.
+      if (sharedOrbit?.key !== data.key) return;
+      sharedOrbit.tables = data.reference;
+      workers.forEach((other, workerIndex) => {
+        if (workerTableKeys[workerIndex] === data.key) return;
+        if (other === worker) { workerTableKeys[workerIndex] = data.key; return; }
+        if (workerIndex >= activeWorkerCount) return;
+        workerTableKeys[workerIndex] = data.key;
+        other.postMessage({ type: 'tables', key: data.key, reference: data.reference });
       });
       return;
     }

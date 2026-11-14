@@ -23,8 +23,8 @@ export const DEEP_LOG_SCALE = -24;
 /** A reused reference may be at most 2^24 CSS pixels from the view centre. */
 const MAX_REFERENCE_OFFSET_BITS = 24;
 
-/** Compact, transferable orbit: normalized mantissas with independent binary exponents. */
-export interface OrbitData { re: Float64Array<ArrayBuffer>; im: Float64Array<ArrayBuffer>; exp: Float64Array<ArrayBuffer> }
+/** Compact orbit: normalized mantissas with independent binary exponents (in shared memory when references are shared). */
+export interface OrbitData { re: Float64Array; im: Float64Array; exp: Float64Array }
 
 /** Where and how deep a reference orbit was computed, and the delta radius its BLA table covers. */
 export interface ReferenceSpec { view: View; limit: number; logRadius: number }

@@ -51,7 +51,18 @@ export const NATIVE_FIELDS = 6;
  */
 export const EXTENDED_FIELDS = 7;
 
-/** A reference orbit in doubles with its BLA tables, as each worker uses it. */
+/**
+ * Makes the arrays a reference is built in: plain ones, or (sharedArray)
+ * views of a SharedArrayBuffer, so one copy serves every worker.
+ */
+export type Allocate = (length: number) => Float64Array;
+export const plainArray: Allocate = length => new Float64Array(length);
+export const sharedArray: Allocate = length => new Float64Array(new SharedArrayBuffer(length * Float64Array.BYTES_PER_ELEMENT));
+
+/**
+ * A reference orbit in doubles with its BLA tables. Only typed arrays, so a
+ * reference built in shared memory can be posted to other workers whole.
+ */
 export interface Reference {
   real: Float64Array;
   imag: Float64Array;
@@ -71,9 +82,9 @@ export interface Reference {
   skipRadiusSquared: Float64Array;
   /** |Z_m|² · 1e-14: below this |z|² has lost too many bits to cancellation (a glitch). */
   glitch: Float64Array;
-  /** Extended-exponent orbit and BLA tables, only built for views that need them (below 2^-900). */
-  orbit?: Extended[];
-  /** log2 |Z_m| for the extended orbit: the kernel compares against it every step. */
+  /** The orbit with independent exponents, which the extended-exponent kernels step along. */
+  points: OrbitData;
+  /** log2 |Z_m|, only built for views that need extended exponents (below 2^-900), as are `levels`. */
   orbitLog?: Float64Array;
   /** Level L holds blocks of 2^L steps starting at orbit index 1 + j 2^L, EXTENDED_FIELDS doubles each. */
   levels?: Float64Array[];
@@ -83,7 +94,7 @@ export interface Reference {
 export type Checkpoint = () => Promise<void>;
 
 /** The expensive, multi-precision part of a reference: computed once, then shared by every worker. */
-export async function computeOrbit(view: View, limit: number, checkpoint: Checkpoint): Promise<OrbitData> {
+export async function computeOrbit(view: View, limit: number, checkpoint: Checkpoint, allocate = plainArray): Promise<OrbitData> {
   const data = { re: new Float64Array(limit + 1), im: new Float64Array(limit + 1), exp: new Float64Array(limit + 1) };
   const shift = BigInt(view.bits);
   const bailout = 256n << (shift * 2n);
@@ -101,7 +112,8 @@ export async function computeOrbit(view: View, limit: number, checkpoint: Checkp
     if (r2 + i2 > bailout) break;
     if (n % 128 === 0) await checkpoint();
   }
-  return { re: data.re.slice(0, length), im: data.im.slice(0, length), exp: data.exp.slice(0, length) };
+  const trim = (values: Float64Array) => { const out = allocate(length); out.set(values.subarray(0, length)); return out; };
+  return { re: trim(data.re), im: trim(data.im), exp: trim(data.exp) };
 }
 
 /** Views at or below this scale need extended-exponent deltas (doubles would underflow). */
@@ -111,15 +123,17 @@ export const EXTENDED_LOG_SCALE = -900;
  * Double-precision orbit and BLA table from a (possibly received) orbit;
  * cheap next to the BigInt orbit. Blocks are merged with extended exponents
  * (long products overflow doubles), but only the native coefficients are
- * kept unless `extended` asks for the object tables as well.
+ * kept unless `extended` asks for the extended tables as well. `allocate`
+ * makes every array of the result (sharedArray: in shared memory).
  */
-export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number, checkpoint: Checkpoint, extended = false): Promise<Reference> {
+export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number, checkpoint: Checkpoint, extended = false,
+  allocate = plainArray): Promise<Reference> {
   const length = data.re.length;
   const point = (i: number): Extended => ({ re: data.re[i], im: data.im[i], exp: data.exp[i] });
-  const real = new Float64Array(length), imag = new Float64Array(length);
+  const real = allocate(length), imag = allocate(length);
   for (let i = 0; i < length; i++) { real[i] = data.re[i] * 2 ** data.exp[i]; imag[i] = data.im[i] * 2 ** data.exp[i]; }
   const store = (blocks: (BLA | undefined)[]) => {
-    const table = new Float64Array(blocks.length * NATIVE_FIELDS);
+    const table = allocate(blocks.length * NATIVE_FIELDS);
     blocks.forEach((block, i) => {
       if (!block || !Number.isFinite(block.ar + block.ai + block.br + block.bi)) return;
       table.set([block.ar, block.ai, block.br, block.bi, block.radiusSquared, block.radius], i * NATIVE_FIELDS);
@@ -127,7 +141,7 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
     return table;
   };
   const storeExtended = (blocks: (BLA | undefined)[]) => {
-    const table = new Float64Array(blocks.length * EXTENDED_FIELDS);
+    const table = allocate(blocks.length * EXTENDED_FIELDS);
     blocks.forEach((block, i) => {
       const o = i * EXTENDED_FIELDS;
       if (!block) { table[o + 6] = -Infinity; return; }
@@ -161,15 +175,18 @@ export async function referenceFromOrbit(data: OrbitData, logDeltaRadius: number
     levels?.push(storeExtended(level));
     last = level;
   }
-  const firstRadiusSquared = new Float64Array(length);
+  const firstRadiusSquared = allocate(length);
   for (let i = 0; i < first.length; i++) firstRadiusSquared[i + 1] = native[0][i * NATIVE_FIELDS + 4];
-  const skipRadiusSquared = new Float64Array(length);
+  const skipRadiusSquared = allocate(length);
   if (native.length > 1) for (let j = 0; j * NATIVE_FIELDS < native[1].length; j++) skipRadiusSquared[1 + 2 * j] = native[1][j * NATIVE_FIELDS + 4];
-  const glitch = new Float64Array(length);
+  const glitch = allocate(length);
   for (let i = 0; i < length; i++) glitch[i] = (real[i] * real[i] + imag[i] * imag[i]) * 1e-14;
-  const orbit = extended ? Array.from({ length }, (_, i) => point(i)) : undefined;
-  return { real, imag, native, firstRadiusSquared, skipRadiusSquared, glitch,
-    orbit, orbitLog: orbit && Float64Array.from(orbit, logMagnitude), levels };
+  let orbitLog: Float64Array | undefined;
+  if (extended) {
+    orbitLog = allocate(length);
+    for (let i = 0; i < length; i++) orbitLog[i] = logMagnitude(point(i));
+  }
+  return { real, imag, native, firstRadiusSquared, skipRadiusSquared, glitch, points: data, orbitLog, levels };
 }
 
 /** Orbit and tables for a view in one go (when no shared orbit is supplied). */

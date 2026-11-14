@@ -4,6 +4,7 @@
  * reference orbits passed around, finished tiles and pass progress.
  */
 import type { View } from '../math/precision.ts';
+import type { Reference } from '../fractal/orbit.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
 import type { Palette } from './palette-names.ts';
 
@@ -13,13 +14,23 @@ export interface RenderRegion { x: number; y: number; width: number; height: num
  * Deep views share one reference orbit. Worker 0 builds it (`build`) and posts
  * it to the main thread, which forwards it; other workers receive `orbit` up
  * front when the main thread already has it, otherwise they wait for it.
+ *
+ * With `share` (the page is cross-origin isolated) the BLA tables are shared
+ * too: the worker told to `build` makes them once in shared memory, from its
+ * orbit, and posts them; the others receive `tables` up front, or wait for
+ * them instead of building their own copy.
  */
 export interface ReferencePlan {
   key: number;
   spec: ReferenceSpec;
   build?: boolean;
   orbit?: OrbitData;
+  share?: boolean;
+  tables?: Reference;
 }
+
+/** Either way: the shared tables of reference `key` (worker 0 -> main thread -> other workers). */
+export interface ReferenceTables { type: 'tables'; key: number; reference: Reference }
 
 /** Main thread -> worker: a shared orbit, delivered whenever it becomes available. */
 export interface ReferenceDelivery { type: 'reference'; key: number; spec: ReferenceSpec; orbit: OrbitData }
@@ -54,7 +65,7 @@ export interface PixelRequest {
   orbitOnly?: boolean;
 }
 
-export type RenderCommand = RenderRequest | PixelRequest | ReferenceDelivery | PaletteSwitch | { type: 'cancel'; id: number };
+export type RenderCommand = RenderRequest | PixelRequest | ReferenceDelivery | ReferenceTables | PaletteSwitch | { type: 'cancel'; id: number };
 
 export interface RenderRequest {
   id: number;
@@ -147,4 +158,4 @@ export interface PixelSamples {
   done?: { samples: number; unresolved: number; fallbacks: number };
 }
 
-export type RenderMessage = ReferenceBuilt | RenderTiles | RenderProgress | PixelSamples | { type: 'error'; id: number; message: string };
+export type RenderMessage = ReferenceBuilt | ReferenceTables | RenderTiles | RenderProgress | PixelSamples | { type: 'error'; id: number; message: string };

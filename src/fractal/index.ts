@@ -11,7 +11,7 @@
  */
 export { INTERIOR, iterationBudget, lastDistance, lastUnresolved } from './escape.ts';
 export { directDouble, directFixed, directRow, insideFixed } from './direct.ts';
-export { buildReference, computeOrbit, EXTENDED_LOG_SCALE, referenceFromOrbit } from './orbit.ts';
+export { buildReference, computeOrbit, EXTENDED_LOG_SCALE, plainArray, referenceFromOrbit, sharedArray } from './orbit.ts';
 export type { Checkpoint, Reference } from './orbit.ts';
 export type { SampleStats } from './perturbation.ts';
 export { createSampler } from './sampler.ts';

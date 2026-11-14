@@ -163,6 +163,40 @@ test('one worker builds the shared orbit; another waits for it and renders ident
   assert.deepEqual(step1(received), step1(standalone));
 });
 
+test('with shared tables one worker builds them in shared memory; the others wait for that copy', async t => {
+  const builder = startWorker(t), waiter = startWorker(t), given = startWorker(t), local = startWorker(t);
+  const base = deepRequest(1);
+  const spec = referenceSpec(base.view, base.cssWidth, base.cssHeight, base.iterations);
+  const posted = [];
+  const tablesBuilt = new Promise(resolve => builder.on('message', m => {
+    if (m.type === 'reference' || m.type === 'tables') posted.push(m.type);
+    if (m.type === 'tables') resolve(m);
+  }));
+  const waiterMessages = [];
+  waiter.on('message', m => waiterMessages.push(m));
+  const pending = collect(waiter, { ...base, reference: { key: 7, spec, share: true } });
+  const own = await collect(builder, { ...base, reference: { key: 7, spec, share: true, build: true } });
+  const { key, reference } = await tablesBuilt;
+  assert.equal(key, 7);
+  assert.deepEqual(posted, ['reference', 'tables'], 'the orbit first (for the GPU), then the tables');
+  // Every array, extended tables included (-1200), lives in shared memory: passing it on copies nothing.
+  const arrays = [reference.real, reference.imag, reference.firstRadiusSquared, reference.skipRadiusSquared, reference.glitch,
+    reference.orbitLog, reference.points.re, reference.points.im, reference.points.exp, ...reference.native, ...reference.levels];
+  assert.ok(reference.levels.length > 0);
+  assert.ok(arrays.every(array => array.buffer instanceof SharedArrayBuffer));
+  // A worker without them waits, even when it holds the orbit; it builds no copy of its own.
+  waiter.postMessage({ type: 'reference', key: 7, spec, orbit: reference.points });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(!waiterMessages.some(m => m.type === 'tiles' || m.type === 'tables'), 'the waiter waits for the tables');
+  waiter.postMessage({ type: 'tables', key: 7, reference });
+  const waited = await pending;
+  const handed = await collect(given, { ...base, reference: { key: 7, spec, tables: reference } });
+  const standalone = await collect(local, base);
+  assert.deepEqual(step1(own), step1(standalone));
+  assert.deepEqual(step1(waited), step1(standalone));
+  assert.deepEqual(step1(handed), step1(standalone));
+});
+
 test('a newer request for the same key continues the build; a different key cancels it', async t => {
   const worker = startWorker(t);
   const base = deepRequest(1);

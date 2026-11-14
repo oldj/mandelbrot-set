@@ -3,6 +3,8 @@
  * them in passes of 8, 4, 2 and 1 pixels, reusing every coarser sample and
  * shading each pixel by its escape count and distance estimate. Deep views
  * share one reference orbit: worker 0 computes it, the main thread forwards it.
+ * On a cross-origin isolated page worker 0 also builds the BLA tables once, in
+ * shared memory, and the others use that one copy instead of building their own.
  * Work yields every ~8 ms, so newer requests cancel older ones promptly.
  *
  * Pixels that reach the budget unresolved are remembered per tile. A later
@@ -10,10 +12,10 @@
  * budget, so the main thread can show the finished draft first and raise the
  * budget only where it is needed.
  */
-import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, referenceFromOrbit } from '../fractal/index.ts';
+import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, plainArray, referenceFromOrbit, sharedArray } from '../fractal/index.ts';
 import { paletteShader } from './palette.ts';
 import { decodeDistance, encodeDistance } from './samples.ts';
-import type { ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
+import type { Reference, ReferenceCache, ReferenceEntry } from '../fractal/index.ts';
 import type { OrbitData, ReferenceSpec } from '../fractal/reference.ts';
 import type { PixelRequest, PixelSamples, ReferencePlan, RenderCommand, RenderMessage, RenderRequest, TileData } from './messages.ts';
 import type { Palette } from './palette-names.ts';
@@ -57,8 +59,10 @@ const yieldToEvents = () => new Promise<void>(resolve => {
 // render: a newer request for the same key continues it instead of restarting.
 let wantedKey: number | undefined;
 let orbit: { key: number; spec: ReferenceSpec; data: OrbitData } | undefined;
+/** Tables in shared memory (ReferencePlan.share), built here or received; kept, like the orbit, while requests use their key. */
+let tables: { key: number; reference: Reference } | undefined;
 let shared: { key: number; promise: Promise<ReferenceEntry> } | undefined;
-let waiting: { key: number; resolve: () => void; reject: (reason: unknown) => void } | undefined;
+let waiting: { key: number; what: 'orbit' | 'tables'; resolve: () => void; reject: (reason: unknown) => void } | undefined;
 /** Pixel requests run one at a time (see samplePixels); a stale one stops at its first checkpoint. */
 let pixelQueue: Promise<void> = Promise.resolve();
 
@@ -69,7 +73,12 @@ self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
   }
   if ('type' in data && data.type === 'reference') {
     orbit = { key: data.key, spec: data.spec, data: data.orbit };
-    if (waiting?.key === data.key) { waiting.resolve(); waiting = undefined; }
+    if (waiting?.key === data.key && waiting.what === 'orbit') { waiting.resolve(); waiting = undefined; }
+    return;
+  }
+  if ('type' in data && data.type === 'tables') {
+    tables = { key: data.key, reference: data.reference };
+    if (waiting?.key === data.key && waiting.what === 'tables') { waiting.resolve(); waiting = undefined; }
     return;
   }
   generation = data.id;
@@ -107,23 +116,36 @@ async function receiveOrbit(plan: ReferencePlan): Promise<OrbitData> {
   }
   const checkpoint = referenceCheckpoint(plan.key);
   if (plan.build) {
-    const data = await computeOrbit(plan.spec.view, plan.spec.limit, checkpoint);
+    const data = await computeOrbit(plan.spec.view, plan.spec.limit, checkpoint, plan.share ? sharedArray : plainArray);
     orbit = { key: plan.key, spec: plan.spec, data };
     send({ type: 'reference', key: plan.key, orbit: data });
     return data;
   }
-  waiting?.reject(CANCELLED);
-  await new Promise<void>((resolve, reject) => { waiting = { key: plan.key, resolve, reject }; });
+  await delivery(plan.key, 'orbit');
   return orbit!.data;
+}
+
+/** Wait for the main thread to deliver the orbit or tables of `key` (a newer request for another key cancels it). */
+function delivery(key: number, what: 'orbit' | 'tables'): Promise<void> {
+  waiting?.reject(CANCELLED);
+  return new Promise<void>((resolve, reject) => { waiting = { key, what, resolve, reject }; });
 }
 
 /** One reference (orbit plus BLA table) per key, however many renders ask for it. */
 function sharedReference(plan: ReferencePlan): Promise<ReferenceEntry> {
   if (shared?.key === plan.key) return shared.promise;
+  if (plan.tables) tables = { key: plan.key, reference: plan.tables };
   const promise = (async () => {
+    // Shared tables are built only by the worker told to build; the others wait for that copy.
+    if (plan.share && !plan.build && tables?.key !== plan.key) await delivery(plan.key, 'tables');
+    if (tables?.key === plan.key) return { ...plan.spec, reference: tables.reference };
     const data = await receiveOrbit(plan);
     const reference = await referenceFromOrbit(data, plan.spec.logRadius, referenceCheckpoint(plan.key),
-      plan.spec.view.logScale <= EXTENDED_LOG_SCALE + 100);
+      plan.spec.view.logScale <= EXTENDED_LOG_SCALE + 100, plan.share ? sharedArray : plainArray);
+    if (plan.share) {
+      tables = { key: plan.key, reference };
+      send({ type: 'tables', key: plan.key, reference });
+    }
     return { ...plan.spec, reference };
   })();
   const current = { key: plan.key, promise };

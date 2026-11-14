@@ -13,7 +13,7 @@ import { formatCoordinate } from '../src/ui/view-info.ts';
 const bundle = await build({ entryPoints: ['src/main.ts'], bundle: true, write: false, format: 'iife',
   loader: { '.css': 'empty' }, define: { 'import.meta.url': '"http://localhost/src/main.ts"' } });
 
-function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '', search = '',
+function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite = async () => {}, hash = '', search = '', isolated = false,
   fetch = async () => ({ json: async () => ({ shorturl: 'https://is.gd/abc123' }) }) } = {}) {
   const canvases = [], workers = [], timers = new Map(), frames = new Map(), mediaQueries = [];
   const clipboardWrites = [], fetches = [];
@@ -111,7 +111,7 @@ function harness({ dpr = 1, width = 800, height = 600, cores = 3, clipboardWrite
     ImageData: class { constructor(data, width, height) {
       if (typeof data === 'number') { this.width = data; this.height = width; this.data = new Uint8ClampedArray(data * width * 4); }
       else { this.data = data; this.width = width; this.height = height; }
-    } }, console,
+    } }, console, crossOriginIsolated: isolated,
   };
   vm.runInNewContext(bundle.outputFiles[0].text, globals);
   const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); };
@@ -886,8 +886,44 @@ test('after a pan, unresolved pixels lead to a full render instead of deepening 
   assert.equal(Number(h.canvas.dataset.computePixels), 100 * 80, 'nothing reused from the lower budget');
 });
 
+test('on a cross-origin isolated page worker 0 builds the BLA tables once and the rest receive that copy', () => {
+  const h = harness({ cores: 4, isolated: true });
+  for (let i = 0; i < 26; i++) h.window.emit('wheel', { clientX: 70, clientY: 300, deltaY: -600, deltaMode: 0 });
+  h.flush();
+  const requests = () => h.workers.map(worker => worker.messages.at(-1));
+  const first = requests();
+  assert.equal(first.length, 3);
+  const { key, spec } = first[0].reference;
+  assert.deepEqual(first[0].reference, { key, spec, share: true, build: true });
+  for (const request of first.slice(1)) assert.deepEqual(request.reference, { key, spec, share: true });
+  // The orbit is for the GPU and worker 0's tables: the others are not sent it.
+  const orbit = { re: new Float64Array([0, 1]), im: new Float64Array([0, 0]), exp: new Float64Array([0, -1]) };
+  h.workers[0].emit({ type: 'reference', key, orbit });
+  assert.deepEqual(requests().slice(1), first.slice(1));
+  const reference = { real: new Float64Array([0, 0.5]) };
+  h.workers[0].emit({ type: 'tables', key, reference });
+  for (const worker of h.workers.slice(1)) assert.deepEqual(worker.messages.at(-1), { type: 'tables', key, reference });
+  // A small pan reuses the reference: every worker already holds the tables.
+  h.canvas.emit('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 400, clientY: 300 });
+  h.canvas.emit('pointermove', { pointerId: 1, clientX: 380, clientY: 300 }); h.flush();
+  const panned = requests().filter(message => message.reference);
+  assert.ok(panned.length > 0);
+  for (const request of panned) assert.deepEqual(request.reference, { key, spec });
+});
+
+test('with shared tables a longer reference keeps every worker, so a raised budget deepens in place', () => {
+  const h = harness({ cores: 9, hash: '#re=-1.75&im=0&zoom=1e300', isolated: true });
+  const first = h.request();
+  assert.equal(first.workerCount, 8);
+  finishRequest(h, { coarseUnresolved: 10, pending: Math.ceil(Number(h.canvas.dataset.computePixels) * 0.02) });
+  const next = h.request();
+  assert.equal(next.deepen, true);
+  assert.equal(next.iterations, first.iterations * 4);
+  assert.equal(next.workerCount, 8);
+});
+
 test('deepening that needs a longer reference than the workers can share renders again with fewer workers', () => {
-  // Below 2^-800 each worker's reference tables take ~336 bytes per iteration: at 4x the budget fewer workers fit.
+  // Below 2^-800 each worker's reference tables take ~280 bytes per iteration: at 4x the budget fewer workers fit.
   const h = harness({ cores: 9, hash: '#re=-1.75&im=0&zoom=1e300' });
   const first = h.request();
   assert.ok(first.reference && first.workerCount > 1, `a deep render with ${first.workerCount} workers`);

@@ -31,6 +31,18 @@ export function add(a: Extended, b: Extended): Extended {
     a.im * 2 ** (a.exp - exp) + b.im * 2 ** (b.exp - exp), exp);
 }
 
+/** A list of Extended values as three arrays (mantissa re, im and exponent), as reference orbits are kept. */
+export interface ExtendedArrays { re: Float64Array; im: Float64Array; exp: Float64Array }
+
+/** add with a = values[i]. */
+export function addAt(values: ExtendedArrays, i: number, b: Extended): Extended {
+  const ar = values.re[i], ai = values.im[i], ae = values.exp[i];
+  if (ar === 0 && ai === 0) return b;
+  if (b.re === 0 && b.im === 0) return { re: ar, im: ai, exp: ae };
+  const exp = Math.max(ae, b.exp);
+  return extended(ar * 2 ** (ae - exp) + b.re * 2 ** (b.exp - exp), ai * 2 ** (ae - exp) + b.im * 2 ** (b.exp - exp), exp);
+}
+
 export function multiply(a: Extended, b: Extended): Extended {
   return extended(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re, a.exp + b.exp);
 }
@@ -56,15 +68,24 @@ function linearParts(ar: number, ai: number, ae: number, z: Extended, br: number
 }
 
 export function perturbStep(reference: Extended, delta: Extended, dc: Extended): Extended {
+  return perturbParts(reference.re, reference.im, reference.exp, delta, dc);
+}
+
+/** perturbStep with the reference point orbit[i]. */
+export function perturbStepAt(orbit: ExtendedArrays, i: number, delta: Extended, dc: Extended): Extended {
+  return perturbParts(orbit.re[i], orbit.im[i], orbit.exp[i], delta, dc);
+}
+
+function perturbParts(zr: number, zi: number, ze: number, delta: Extended, dc: Extended): Extended {
   if (delta.re === 0 && delta.im === 0) return dc;
-  const a = reference.re === 0 && reference.im === 0 ? -Infinity : reference.exp + delta.exp + 1;
+  const a = zr === 0 && zi === 0 ? -Infinity : ze + delta.exp + 1;
   const b = 2 * delta.exp;
   const c = dc.re === 0 && dc.im === 0 ? -Infinity : dc.exp;
   const exp = Math.max(a, b, c);
   const sa = 2 ** (a - exp), sb = 2 ** (b - exp), sc = 2 ** (c - exp);
-  return extended((reference.re * delta.re - reference.im * delta.im) * sa
+  return extended((zr * delta.re - zi * delta.im) * sa
     + (delta.re * delta.re - delta.im * delta.im) * sb + dc.re * sc,
-  (reference.re * delta.im + reference.im * delta.re) * sa
+  (zr * delta.im + zi * delta.re) * sa
     + 2 * delta.re * delta.im * sb + dc.im * sc, exp);
 }
 

@@ -6,7 +6,7 @@
  * perturbExtended carries a separate exponent below that, and runs in doubles
  * wherever δ (and a proof's radii) are back inside double range.
  */
-import { add, extended, linearAt, logAdd, logMagnitude, magnitude, perturbStep, ZERO } from '../math/extended.ts';
+import { add, addAt, extended, linearAt, logAdd, logMagnitude, magnitude, perturbStepAt, ZERO } from '../math/extended.ts';
 import type { Extended } from '../math/extended.ts';
 import { escapeDistance, INTERIOR, lastSample, smooth } from './escape.ts';
 import {
@@ -234,7 +234,7 @@ const FAST_RADIUS_LOG = -900, FAST_RADIUS = 2 ** FAST_RADIUS_LOG, UP = 1 + 2 ** 
  * its start in provedExtendedCycle for the next pixel.
  */
 export function perturbExtended(reference: Reference, dc: Extended, limit: number, fallback: () => number, stats: SampleStats, logPixel: number): number {
-  const orbit = reference.orbit!, orbitLog = reference.orbitLog!;
+  const orbit = reference.points, orbitLog = reference.orbitLog!;
   const logDc = logMagnitude(dc);
   // logDelta is always logMagnitude(delta), kept alongside it rather than recomputed at each use.
   let delta = ZERO, logDelta = -Infinity, m = 0, n = 0;
@@ -392,7 +392,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
         m += length; n += length; stats.skipped += length - 1;
       } else {
         if (verify) {
-          const logZ = logMagnitude(add(orbit[m], delta)), logReference = orbitLog[m];
+          const logZ = logMagnitude(addAt(orbit, m, delta)), logReference = orbitLog[m];
           const rounding = LOG_ROUNDING + logAdd(logAdd(2 + logReference + logDelta, 2 * logDelta), logDc);
           for (let i = 0; i < 4; i++) {
             logRadii[i] = logAdd(logRadii[i] + logAdd(1 + logZ, logRadii[i]), rounding);
@@ -410,13 +410,13 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
         const nextEr = 2 * (zr * er - zi * ei) + lift;
         ei = 2 * (zr * ei + zi * er); er = nextEr;
         if (Math.abs(er) + Math.abs(ei) > 2 ** 256) { er *= 2 ** -256; ei *= 2 ** -256; lift *= 2 ** -256; eExp += 256; }
-        delta = perturbStep(orbit[m], delta, dc);
+        delta = perturbStepAt(orbit, m, delta, dc);
         m++; n++;
       }
     }
     logDelta = logMagnitude(delta);
-    const z = orbit[m], logReference = orbitLog[m];
-    const total = add(z, delta);
+    const logReference = orbitLog[m];
+    const total = addAt(orbit, m, delta);
     const logTotal = logMagnitude(total);
     if (logTotal > 4) {
       lastSample.distance = 2 ** (logTotal - Math.log2(Math.hypot(er, ei)) - eExp) * logTotal * Math.LN2;
@@ -425,7 +425,7 @@ export function perturbExtended(reference: Reference, dc: Extended, limit: numbe
     const unit = 2 ** total.exp;
     zr = total.re * unit; zi = total.im * unit;
     if (logTotal < logReference - 24 || Number.isNaN(logTotal)) return fallback();
-    const rebase = logTotal < logDelta || m === orbit.length - 1;
+    const rebase = logTotal < logDelta || m === end;
     if (verify) {
       const error = LOG_ROUNDING + logAdd(logReference, logDelta);
       if (--verify === 0) {

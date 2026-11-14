@@ -1,7 +1,7 @@
 /**
  * How many render workers to run: up to one fewer than the logical cores (at
  * most 8), fewer for small regions, and fewer when long reference orbits would
- * multiply memory across workers.
+ * multiply memory across workers (unless the workers share one copy).
  */
 import { DEEP_LOG_SCALE } from '../fractal/reference.ts';
 /** Leave a logical core available for input, compositing and the rest of the page. */
@@ -14,21 +14,22 @@ export function workerCapacity(hardwareConcurrency: number | undefined): number 
 const REFERENCE_MEMORY = 192 * 1024 * 1024;
 
 /**
- * Per worker and orbit step: native BLA tables in typed arrays plus the
- * orbit (~160 B); below 2^-800 also the extended-exponent tables (flat
- * arrays) and the orbit as Extended objects (~336 B; measured in Node 24).
+ * Per worker and orbit step: native BLA tables plus the orbit (~160 B);
+ * below 2^-800 also the extended-exponent tables (~280 B in all; measured in
+ * Node 24). All typed arrays.
  */
 export function referenceBytesPerIteration(logScale: number): number {
-  return logScale <= -800 ? 336 : 160;
+  return logScale <= -800 ? 280 : 160;
 }
 
-export function renderWorkerCount(capacity: number, pixels: number, logScale: number, iterations: number): number {
+/** `shared`: the workers share one copy of the reference tables (a cross-origin isolated page). */
+export function renderWorkerCount(capacity: number, pixels: number, logScale: number, iterations: number, shared = false): number {
   const deep = logScale <= DEEP_LOG_SCALE;
   const workload = Math.ceil(pixels / (deep ? 8192 : 65536));
-  // Each deep worker owns a copy of the reference tables. This is a conservative
-  // planning estimate (not a hard memory bound), so very long references don't
-  // multiply unchecked just because a device advertises many cores.
-  const referenceLimit = deep ? Math.floor(REFERENCE_MEMORY / (iterations * referenceBytesPerIteration(logScale))) : capacity;
+  // Otherwise each deep worker owns a copy of the reference tables. This is a
+  // conservative planning estimate (not a hard memory bound), so very long
+  // references don't multiply unchecked just because a device advertises many cores.
+  const referenceLimit = deep && !shared ? Math.floor(REFERENCE_MEMORY / (iterations * referenceBytesPerIteration(logScale))) : capacity;
   return Math.max(1, Math.min(capacity, workload, referenceLimit));
 }
 
