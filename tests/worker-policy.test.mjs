@@ -35,3 +35,18 @@ test('pixels are dealt in runs of neighbours, and a short list still reaches eve
   assert.deepEqual(dealRuns(list.subarray(0, 3), 8, 32).map(share => share.length), [1, 1, 1, 0, 0, 0, 0, 0]);
   assert.deepEqual(dealRuns(new Uint32Array(0), 8, 32).map(share => share.length), [0, 0, 0, 0, 0, 0, 0, 0]);
 });
+
+test('unresolved pixels from several workers merge tile by tile from the centre out, each tile in its own order', async () => {
+  const { centreFirst } = await import('../src/render/worker-policy.ts');
+  // 128x64 in 32-pixel tiles: 4x2 tiles; the centre (64, 32) is a corner of tiles 1, 2, 5 and 6.
+  const width = 128, height = 64, at = (x, y) => y * width + x;
+  const worker0 = Uint32Array.from([at(0, 0), at(1, 0), at(5, 40), at(70, 3), at(65, 10)]);   // tiles 0, 4, 2
+  const worker1 = Uint32Array.from([at(40, 33), at(33, 60), at(100, 50)]);                   // tiles 5, 7
+  const merged = [...centreFirst([worker0, worker1], width, height, 32)];
+  assert.equal(merged.length, 8);
+  // Tiles 2 and 5 (both at the centre) before 0, 4 and 7; within a tile, the reported order.
+  assert.deepEqual(merged.slice(0, 4), [at(70, 3), at(65, 10), at(40, 33), at(33, 60)]);
+  assert.deepEqual(new Set(merged.slice(4)), new Set([at(0, 0), at(1, 0), at(5, 40), at(100, 50)]));
+  assert.deepEqual(merged.slice(4).filter(i => i === at(0, 0) || i === at(1, 0)), [at(0, 0), at(1, 0)]);
+  assert.deepEqual([...centreFirst([], width, height, 32)], []);
+});

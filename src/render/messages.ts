@@ -36,14 +36,15 @@ export interface ReferenceTables { type: 'tables'; key: number; reference: Refer
 export interface ReferenceDelivery { type: 'reference'; key: number; spec: ReferenceSpec; orbit: OrbitData }
 
 /**
- * Main thread -> worker: render `id` (under way, or finished and perhaps to be
- * deepened) continues in another palette; tiles started from now on use it.
+ * Main thread -> worker: render `id`, under way, continues in another palette;
+ * tiles started from now on use it.
  */
 export interface PaletteSwitch { type: 'palette'; id: number; palette: Palette }
 
 /**
  * Main thread -> worker: sample exactly the listed pixels (indices y width + x
- * into the surface) of render `id`, the ones GPU rendering left to the CPU.
+ * into the surface) of render `id`: the ones GPU rendering left to the CPU, or
+ * those a draft left unresolved, at a raised budget.
  */
 export interface PixelRequest {
   type: 'pixels';
@@ -81,11 +82,6 @@ export interface RenderRequest {
   reference?: ReferencePlan;
   /** The colour scheme (classic when absent). */
   palette?: Palette;
-  /**
-   * Resample only the pixels the finished render `id` left unresolved, at
-   * `iterations` (more than before), and send their tiles again.
-   */
-  deepen?: boolean;
 }
 
 /** One finished tile; `step` is the sample spacing in physical pixels. */
@@ -131,10 +127,12 @@ export interface RenderProgress {
   /** Time spent sampling in the pass, and the part of it spent on the unresolved samples (ms). */
   sampleMs?: number;
   unresolvedMs?: number;
-  /** After the final pass or a deepening: this worker's final pixels still unresolved. */
+  /**
+   * After the final pass: this worker's final pixels still unresolved, how many and which (indices
+   * y width + x, tile by tile nearest the centre first, row by row within each).
+   */
   pending?: number;
-  /** Progress of a `deepen` request rather than of a pass. */
-  deepen?: boolean;
+  pendingPixels?: Uint32Array<ArrayBuffer>;
 }
 
 /** Worker -> main thread: the orbit a `build` plan produced. */

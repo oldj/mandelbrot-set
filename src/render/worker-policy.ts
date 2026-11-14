@@ -51,3 +51,25 @@ export function dealRuns(list: Uint32Array, workers: number, run: number): Uint3
   }
   return shares;
 }
+
+/**
+ * Merge lists of pixels (indices y width + x), each holding whole `tile`-pixel tiles row by row (as
+ * the workers' final passes report their unresolved ones), into one: tile by tile nearest the canvas
+ * centre first, each tile's pixels together and in their order. So dealRuns hands every worker
+ * neighbouring pixels near the centre first, as the workers' own tiles were.
+ */
+export function centreFirst(lists: readonly Uint32Array[], width: number, height: number, tile: number): Uint32Array<ArrayBuffer> {
+  const tilesX = Math.ceil(width / tile), tilesY = Math.ceil(height / tile);
+  const tileOf = (i: number) => Math.floor(Math.floor(i / width) / tile) * tilesX + Math.floor((i % width) / tile);
+  const sizes = new Uint32Array(tilesX * tilesY);
+  let total = 0;
+  for (const list of lists) for (const i of list) { sizes[tileOf(i)]++; total++; }
+  const distance = (t: number) => ((t % tilesX + 0.5) * tile - width / 2) ** 2 + ((Math.floor(t / tilesX) + 0.5) * tile - height / 2) ** 2;
+  const order = Array.from(sizes.keys()).filter(t => sizes[t] > 0).sort((a, b) => distance(a) - distance(b) || a - b);
+  const offsets = new Uint32Array(tilesX * tilesY);
+  let at = 0;
+  for (const t of order) { offsets[t] = at; at += sizes[t]; }
+  const merged = new Uint32Array(total);
+  for (const list of lists) for (const i of list) merged[offsets[tileOf(i)]++] = i;
+  return merged;
+}

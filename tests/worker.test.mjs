@@ -275,7 +275,7 @@ test('outlines use each pixel\'s distance estimate in physical pixels, the same 
   assert.ok(shaded > checked / 10, `outlines change part of this view (${shaded} of ${checked})`);
 });
 
-/** All messages of one request up to its final pass (or deepening): the tiles and that pass. */
+/** All messages of one request up to its final pass: the tiles and that pass. */
 function run(worker, request) {
   return new Promise((resolve, reject) => {
     const tiles = [];
@@ -283,7 +283,7 @@ function run(worker, request) {
       if (message.id !== request.id) return;
       if (message.type === 'error') reject(new Error(message.message));
       if (message.type === 'tiles') tiles.push(...message.tiles);
-      if (message.type === 'pass' && message.step === 1 && Boolean(message.deepen) === Boolean(request.deepen)) {
+      if (message.type === 'pass' && message.step === 1) {
         worker.off('message', receive);
         resolve({ tiles, pass: message });
       }
@@ -320,15 +320,12 @@ test('every tile carries its samples\' counts and distances, from which its pale
     return pixels;
   };
   for (const palette of ['classic', 'vivid']) {
-    // Including pixels inherited from coarser passes, and those a deepening sends again.
+    // Including pixels inherited from coarser passes.
     const draft = await run(worker, { ...base, id: palette === 'vivid' ? 3 : 1, iterations: 2560, palette });
     assert.ok(draft.tiles.every(tile => tile.palette === palette));
     assert.equal(check(draft.tiles), width * height);
-    assert.ok(draft.pass.pending > 0, 'some pixels to deepen');
-    const deepened = await run(worker, { ...base, id: palette === 'vivid' ? 3 : 1, iterations: 10240, palette, deepen: true });
-    assert.ok(check(deepened.tiles) > 0);
   }
-  // Switched after the coarse pass: later tiles (inherited samples too) are in the new palette, and so is a later deepening.
+  // Switched after the coarse pass: later tiles (inherited samples too) are in the new palette.
   // The worker holds at its first yield after the coarse pass (see the host) while the switch is sent,
   // so it lands mid-render however late this thread gets to it (it used to race the render under load).
   // Four times the pixels: the yield comes well before the final pass on any machine.
@@ -354,33 +351,54 @@ test('every tile carries its samples\' counts and distances, from which its pale
   assert.ok(switched > 0, 'the coarse pass was classic, and the switch took effect');
   assert.ok(tiles.slice(switched).every(tile => tile.palette === 'vivid'), 'every tile after the switch is vivid');
   assert.ok(tiles.filter(tile => tile.step === 1).every(tile => tile.palette === 'vivid'), 'the final pass is vivid');
-  const deepened = await run(worker, { ...wide, id: 5, iterations: 10240, palette: 'classic', deepen: true });
-  assert.ok(deepened.tiles.length && deepened.tiles.every(tile => tile.palette === 'vivid'));
-  check(deepened.tiles);
 });
 
-test('deepening resamples only unresolved pixels and ends identical to rendering at the deeper budget', async t => {
+/** Send a pixel job and gather its samples by pixel: [count, distance level, unresolved]. */
+function pixelJob(worker, request) {
+  return new Promise((resolve, reject) => {
+    const got = new Map();
+    const receive = message => {
+      if (message.id !== request.id || message.type !== 'samples' || message.round !== request.round) return;
+      message.indices.forEach((i, k) => got.set(i, [message.counts[k], message.distances[k], message.unresolved[k]]));
+      if (message.done) { worker.off('message', receive); resolve(got); }
+    };
+    worker.on('error', reject);
+    worker.on('message', receive);
+    worker.postMessage(request);
+  });
+}
+
+test('the final pass lists its unresolved pixels; sampling them at a deeper budget, dealt out as main.ts does, matches rendering at it', async t => {
   const { parseViewHash } = await import('../src/ui/url-state.ts');
+  const { paletteShader } = await import('../src/render/palette.ts');
+  const { decodeDistance } = await import('../src/render/samples.ts');
+  const { centreFirst, dealRuns } = await import('../src/render/worker-policy.ts');
+  const shade = paletteShader('classic');
   for (const [hash, low, high] of [
     ['#re=-0.62665817544438&im=0.39074560013374&zoom=1.835504281e8', 8192, 32768], // shallow, near the 13/30 root
     ['#re=-0.730883269553203772&im=0.247817380961806007&zoom=1.827554774e12', 2560, 10240], // perturbation
   ]) {
     const width = 40, height = 25, view = parseViewHash(hash, initialView(width, height).logScale);
-    const base = { view, width, height, cssWidth: width, cssHeight: height, workerIndex: 0, workerCount: 1 };
-    const worker = startWorker(t), fresh = startWorker(t);
-    const draft = await run(worker, { ...base, id: 1, iterations: low });
-    assert.ok(draft.pass.pending > 0, 'the draft leaves pixels unresolved');
-    const deepened = await run(worker, { ...base, id: 1, iterations: high, deepen: true });
-    assert.equal(deepened.pass.samples, draft.pass.pending, 'only the unresolved pixels are sampled again');
-    assert.ok(deepened.pass.pending < draft.pass.pending, `${deepened.pass.pending} of ${draft.pass.pending} still unresolved`);
-    const image = paint(paint(new Uint32Array(width * height), width, draft.tiles), width, deepened.tiles);
-    const direct = paint(new Uint32Array(width * height), width, (await run(fresh, { ...base, id: 1, iterations: high })).tiles);
+    const base = { view, width, height, cssWidth: width, cssHeight: height, workerCount: 2 };
+    const workers = [startWorker(t), startWorker(t)], fresh = [startWorker(t), startWorker(t)];
+    const drafts = await Promise.all(workers.map((worker, workerIndex) => run(worker, { ...base, workerIndex, id: 1, iterations: low })));
+    const lists = drafts.map(draft => draft.pass.pendingPixels);
+    lists.forEach((list, k) => assert.equal(list.length, drafts[k].pass.pending));
+    const list = centreFirst(lists, width, height, 32);
+    assert.ok(list.length > 0, 'the draft leaves pixels unresolved');
+    const image = new Uint32Array(width * height);
+    for (const draft of drafts) paint(image, width, draft.tiles);
+    // Each listed pixel is one the draft left unresolved (painted from its count, -1).
+    for (const i of list) assert.equal(image[i], shade(-1, NaN), `pixel ${i} is unresolved`);
+    const shares = dealRuns(list, 2, 32);
+    const results = await Promise.all(shares.map((pixels, k) => pixelJob(workers[k],
+      { type: 'pixels', id: 1, view, width, height, cssWidth: width, cssHeight: height, iterations: high, pixels, round: 1 })));
+    let left = 0;
+    for (const got of results) for (const [i, [count, level, unresolved]] of got) { image[i] = shade(count, decodeDistance(level)); left += unresolved; }
+    assert.ok(left < list.length, `${left} of ${list.length} still unresolved`);
+    const direct = new Uint32Array(width * height);
+    for (const draft of await Promise.all(fresh.map((worker, workerIndex) => run(worker, { ...base, workerIndex, id: 1, iterations: high })))) paint(direct, width, draft.tiles);
     assert.deepEqual(image, direct);
-    // A deepening for a render that is no longer the latest does nothing.
-    await run(worker, { ...base, id: 2, iterations: low });
-    const stale = await run(worker, { ...base, id: 1, iterations: high, deepen: true });
-    assert.equal(stale.pass.samples, 0);
-    assert.equal(stale.tiles.length, 0);
   }
 });
 

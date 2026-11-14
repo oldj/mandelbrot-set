@@ -23,7 +23,7 @@ import { stageSamples, TileStage } from './render/tile-stage.ts';
 import { formatViewHash, parseViewHash, viewHashPalette } from './ui/url-state.ts';
 import { isPalette } from './render/palette-names.ts';
 import type { Palette } from './render/palette-names.ts';
-import { dealRuns, renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
+import { centreFirst, dealRuns, renderWorkerCount, workerCapacity } from './render/worker-policy.ts';
 import { DEEP_LOG_SCALE, needsReference, referenceOffset, referenceSpec, viewLogRadius } from './fractal/reference.ts';
 import type { OrbitData, ReferenceSpec } from './fractal/reference.ts';
 import type { PixelRequest, PixelSamples, ReferencePlan, RenderMessage, RenderRegion, RenderRequest, TileData } from './render/messages.ts';
@@ -57,9 +57,13 @@ let coarseSamples = 0, coarseUnresolved = 0, coarseMs = 0, coarseUnresolvedMs = 
  * draft. Draft-first pays where they are dear, as near parabolic points.
  */
 const DRAFT_LIMIT = 0.25, CHEAP_RAISE = 0.1;
-/** Unresolved final pixels reported for the current draft or deepening, and how many workers reported. */
-let pendingPixels = 0, deepenReports = 0;
-/** The budget the running deepening samples at (0: none), and the request it extends. */
+/**
+ * Unresolved final pixels of the current draft or deepening: how many, and which (lists of indices
+ * y width + x, as the workers' final passes report them).
+ */
+let pendingPixels = 0;
+let pendingLists: Uint32Array[] = [];
+/** The budget the running deepening samples at (0: none). */
 let deepenIterations = 0;
 let renderBase: Omit<RenderRequest, 'workerIndex' | 'reference'> | undefined;
 let renderPixelCount = 0;
@@ -185,7 +189,7 @@ if (gpuStarting) {
   void GpuRenderer.create().then(renderer => { if (gpuStarting) ready(renderer); else gpu ??= renderer; });
   setTimeout(() => ready(), 2000);
 }
-/** The current GPU render's handler for the workers' samples, and how to release it when a newer render starts. */
+/** The handler for the workers' samples (a GPU render's, or a deepening's), and how to release it when a newer render starts. */
 let gpuFix: ((message: PixelSamples) => void) | undefined;
 let gpuFixRelease: (() => void) | undefined;
 /** GPU renders waiting for the shared orbit with this key (all released when a new render starts). */
@@ -846,7 +850,8 @@ function startRender(preview = false): void {
   coarseReady = false;
   passCounts.clear();
   coarseSamples = coarseUnresolved = coarseMs = coarseUnresolvedMs = 0;
-  pendingPixels = deepenReports = deepenIterations = 0;
+  pendingPixels = deepenIterations = 0;
+  pendingLists = [];
   canvas.dataset.rendered = 'false';
   canvas.setAttribute('aria-busy', 'true');
   canvas.dataset.precisionBits = String(view.bits);
@@ -951,6 +956,8 @@ const LEFT_CHUNK = 1024;
  * and a shallow interior pixel cost it 3-5 times as much.
  */
 const DEAL_RUN = 32;
+/** The workers' tile size: they report unresolved pixels tile by tile (see centreFirst). */
+const DEEPEN_TILE = 32;
 /** Pixels sent to the workers before a fine pass (see gpuRender) go in chunks of about this many. */
 const DIRECT_CHUNK = 65536;
 /** Main-thread loops over every pixel give the page a turn after this long. */
@@ -1013,28 +1020,72 @@ function settle(): void {
   const adapted = adaptBudget(budgetMemory, surface!.view.logScale, surface!.iterations, renderPixelCount, pendingPixels, FINAL_RAISE_FRACTION);
   budgetMemory = adapted.memory;
   if (adapted.raise && renderBase) {
-    const iterations = adapted.memory!.iterations;
-    // Deepening covers only the pixels this render computed, with its workers.
-    // After a pan, reused pixels keep the old budget's unresolved ones, and a
-    // longer reference may call for fewer workers (each holds its tables): in
-    // both cases render the whole surface again at the raised budget instead.
-    const whole = renderPixelCount === surface!.canvas.width * surface!.canvas.height;
-    if (!whole || renderWorkerCount(workerLimit, renderPixelCount, renderBase.view.logScale, iterations, shareTables) < activeWorkerCount) {
-      startRender();
-      return;
-    }
-    deepenIterations = iterations;
-    pendingPixels = deepenReports = 0;
-    canvas.dataset.deepening = String(deepenIterations);
-    const shared = planReference(renderBase.view, deepenIterations);
-    workers.forEach((worker, workerIndex) => {
-      if (workerIndex >= activeWorkerCount) return;
-      worker.postMessage({ ...renderBase!, workerIndex, iterations: deepenIterations, deepen: true,
-        reference: shared && referencePlan(shared, workerIndex) } satisfies RenderRequest);
-    });
+    // Deepening covers only the pixels this render computed. After a pan, reused
+    // pixels keep the old budget's unresolved ones: render the whole surface
+    // again at the raised budget instead.
+    if (renderPixelCount !== surface!.canvas.width * surface!.canvas.height) { startRender(); return; }
+    deepen(adapted.memory!.iterations);
     return;
   }
   finishRender();
+}
+
+/**
+ * Sample the pixels the draft (or the last deepening) left unresolved again, at `iterations`. The
+ * workers' lists are merged and dealt out afresh, evenly in runs from the centre out (see dealRuns),
+ * not left with the workers whose tiles they fell in: interiors gather on one side of many views,
+ * and a worker that owned most of them worked on for seconds after the rest (3.6 s and 7.6 s of
+ * 24 s and 30 s at -0.7309+0.2478i, 4.2e13). The results come back as samples, as a GPU render's do.
+ */
+function deepen(iterations: number): void {
+  const id = generation, base = renderBase!, { width, height, view: target } = base;
+  const list = centreFirst(pendingLists, width, height, DEEPEN_TILE);
+  deepenIterations = iterations;
+  pendingPixels = 0;
+  pendingLists = [];
+  canvas.dataset.deepening = String(iterations);
+  // Every worker the reference memory allows, even for a few pixels (each may run the whole budget; see cpuRound).
+  const deep = target.logScale <= DEEP_LOG_SCALE;
+  activeWorkerCount = renderWorkerCount(workerLimit, list.length * (deep ? 32 : 2048), target.logScale, iterations, shareTables);
+  canvas.dataset.workers = String(activeWorkerCount);
+  while (workers.length < activeWorkerCount) createWorker();
+  const shared = planReference(target, iterations), round = ++gpuRounds, unresolved: number[] = [];
+  // Colours come from the palette shaders, loaded here on first use; results wait for them in order.
+  const ready = shaders ? Promise.resolve() : import('./render/palette.ts').then(module => { shaders ??= module; });
+  let requests = 0, reports = 0;
+  const finish = () => {
+    gpuFix = gpuFixRelease = undefined;
+    // The surface now holds the deeper budget's pixels throughout (resolved ones never depended on it).
+    surface!.iterations = iterations;
+    canvas.dataset.iterations = String(iterations);
+    deepenIterations = 0;
+    pendingPixels = unresolved.length;
+    // In index order: centreFirst keeps each tile's pixels in the order given, row by row.
+    pendingLists = [Uint32Array.from(unresolved).sort()];
+    settle();
+  };
+  const apply = (message: PixelSamples) => {
+    if (generation !== id || !stage) return;
+    const shade = shaders!.paletteShader(palette), words = new Uint32Array(message.indices.length);
+    samples ??= { counts: new Float32Array(stage.width * stage.height).fill(NaN), distances: new Uint8Array(stage.width * stage.height) };
+    for (let k = 0; k < words.length; k++) {
+      const i = message.indices[k];
+      words[k] = shade(message.counts[k], decodeDistance(message.distances[k]));
+      samples.counts[i] = message.counts[k]; samples.distances[i] = message.distances[k];
+      if (message.unresolved[k]) unresolved.push(i);
+    }
+    stage.addPixels(message.indices, words, quality);
+    scheduleDraw();
+    if (message.done && ++reports === requests) finish();
+  };
+  gpuFix = message => { if (message.round === round) void ready.then(() => apply(message)); };
+  dealRuns(list, activeWorkerCount, DEAL_RUN).forEach((share, workerIndex) => {
+    if (!share.length) return;
+    requests++;
+    workers[workerIndex].postMessage({ type: 'pixels', id, view: target, width, height, cssWidth: base.cssWidth, cssHeight: base.cssHeight,
+      iterations, reference: shared && referencePlan(shared, workerIndex), pixels: share, round } satisfies PixelRequest, [share.buffer]);
+  });
+  if (!requests) finish();
 }
 
 function finishRender(): void {
@@ -1092,25 +1143,16 @@ function createWorker(): void {
       return;
     }
     if (data.type === 'pass') {
-      if (data.deepen) {
-        if (!deepenIterations) return;
-        pendingPixels += data.pending ?? 0;
-        if (++deepenReports === activeWorkerCount) {
-          // The surface now holds the deeper budget's pixels throughout (resolved ones never depended on it).
-          surface.iterations = deepenIterations;
-          canvas.dataset.iterations = String(deepenIterations);
-          deepenIterations = 0;
-          settle();
-        }
-        return;
-      }
       const count = (passCounts.get(data.step) || 0) + 1;
       passCounts.set(data.step, count);
       if (data.step === 8) {
         coarseSamples += data.samples; coarseUnresolved += data.unresolved;
         coarseMs += data.sampleMs ?? 0; coarseUnresolvedMs += data.unresolvedMs ?? Infinity;
       }
-      if (data.step === 1) pendingPixels += data.pending ?? 0;
+      if (data.step === 1) {
+        pendingPixels += data.pending ?? 0;
+        if (data.pendingPixels) pendingLists.push(data.pendingPixels);
+      }
       if (count === activeWorkerCount) {
         completedStep = data.step;
         if (data.step === 8) {
@@ -1227,7 +1269,7 @@ async function applyPalette(): Promise<void> {
   const next = palette;
   // Nothing kept to recolour from (no tile has arrived): render again.
   if (!samples) { startRender(); return; }
-  // Workers can switch at once; renders and deepenings requested later carry the palette themselves.
+  // Workers can switch at once; renders requested later carry the palette themselves (a deepening's samples are coloured here).
   workers.forEach((worker, workerIndex) => { if (workerIndex < activeWorkerCount) worker.postMessage({ type: 'palette', id: generation, palette: next }); });
   if (renderBase) renderBase = { ...renderBase, palette: next };
   shaders ??= await import('./render/palette.ts');

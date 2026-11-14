@@ -7,10 +7,10 @@
  * shared memory, and the others use that one copy instead of building their own.
  * Work yields every ~8 ms, so newer requests cancel older ones promptly.
  *
- * Pixels that reach the budget unresolved are remembered per tile. A later
- * `deepen` request for the same render resamples just those at a larger
- * budget, so the main thread can show the finished draft first and raise the
- * budget only where it is needed.
+ * The final pass reports the pixels that reached the budget unresolved. The
+ * main thread can show the finished draft first, then raise the budget only
+ * for those: it deals them out evenly to all workers as pixel requests
+ * (samplePixels), as it does for the pixels a GPU render leaves.
  */
 import { computeOrbit, createSampler, EXTENDED_LOG_SCALE, lastDistance, lastUnresolved, plainArray, referenceFromOrbit, sharedArray } from '../fractal/index.ts';
 import { paletteShader } from './palette.ts';
@@ -21,7 +21,7 @@ import type { PixelRequest, PixelSamples, ReferencePlan, RenderCommand, RenderMe
 import type { Palette } from './palette-names.ts';
 
 let generation = 0;
-/** A palette switch for a render under way (or finished, for its deepening): tiles started after it use it. */
+/** A palette switch for a render under way: tiles started after it use it. */
 let switched: { id: number; palette: Palette } | undefined;
 const referenceCache: ReferenceCache = {};
 const CANCELLED = Symbol('cancelled');
@@ -35,11 +35,9 @@ interface OwnTile {
   previous?: Uint32Array; previousCounts?: Float32Array; previousDistances?: Uint8Array; previousColumns: number;
   /** The palette its colours (previous, final) are in. */
   palette?: Palette;
-  /** 1 for final pixels that reached the budget unresolved (allocated on the first one), and the tile's final samples. */
-  pending?: Uint8Array; final?: Uint32Array; finalCounts?: Float32Array; finalDistances?: Uint8Array;
+  /** 1 for final pixels that reached the budget unresolved (allocated on the first one). */
+  pending?: Uint8Array;
 }
-/** The last finished render: its request and the tiles that still have unresolved pixels. */
-let finished: { request: RenderRequest; tiles: OwnTile[] } | undefined;
 const send = (message: RenderMessage, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 /**
@@ -91,7 +89,7 @@ self.onmessage = ({ data }: MessageEvent<RenderCommand>) => {
     return;
   }
   if ('type' in data) return;
-  void (data.deepen ? deepen(data) : render(data)).catch(error => {
+  void render(data).catch(error => {
     if (error !== CANCELLED) send({ type: 'error', id: data.id, message: String(error) });
   });
 };
@@ -201,7 +199,6 @@ async function render(request: RenderRequest): Promise<void> {
   const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
   const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
   const targets = new Int32Array(TILE_SIZE), unresolved = new Uint8Array(TILE_SIZE);
-  if (finished?.request.id !== id) finished = undefined;
   // Distance estimates come in CSS pixels; outlines are measured in physical
   // ones, the same in every pass, so coarse previews match the final image.
   const physical = width / cssWidth;
@@ -266,11 +263,10 @@ async function render(request: RenderRequest): Promise<void> {
         samples += count;
         await checkpoint();
       }
-      // The pixel buffer is transferred below; keep a copy for the next pass, or for deepening.
+      // The pixel buffer is transferred below; keep a copy for the next pass.
       tile.previous = step > 1 ? words.slice() : undefined;
       tile.previousCounts = step > 1 ? counts : undefined;
       tile.previousDistances = step > 1 ? edges : undefined;
-      if (step === 1 && tile.pending) { tile.final = words.slice(); tile.finalCounts = counts.slice(); tile.finalDistances = edges.slice(); }
       tile.previousColumns = columns;
       tile.palette = tilePalette;
       batch.push({ x: tile.x, y: tile.y, width: columns, height: rows, clipWidth: tile.width, clipHeight: tile.height,
@@ -283,94 +279,32 @@ async function render(request: RenderRequest): Promise<void> {
     }
     await checkpoint();
     flush();
-    if (step === 1) finished = { request, tiles: tiles.filter(tile => tile.pending) };
+    const pendingPixels = step === 1 ? unresolvedPixels(tiles, width) : undefined;
     send({ type: 'pass', id, step, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
       samples, unresolved: (sampler?.stats.unresolved ?? 0) - unresolvedBefore, sampleMs, unresolvedMs,
-      pending: step === 1 ? countPending(finished!.tiles) : undefined });
+      pending: pendingPixels?.length, pendingPixels }, pendingPixels ? [pendingPixels.buffer] : []);
   }
 }
 
-function countPending(tiles: OwnTile[]): number {
+/** The final pixels left unresolved, as indices y width + x: tile by tile in the given order, row by row within each. */
+function unresolvedPixels(tiles: OwnTile[], width: number): Uint32Array<ArrayBuffer> {
   let total = 0;
-  for (const tile of tiles) for (const flag of tile.pending!) total += flag;
-  return total;
-}
-
-/**
- * Resample the unresolved pixels of the finished render `request.id` at the
- * larger `request.iterations`, and send each changed tile again (at step 1,
- * so it replaces the old one). Samples are exactly those of a fresh render at
- * that budget, so the result matches rendering it directly.
- */
-async function deepen(request: RenderRequest): Promise<void> {
-  const started = performance.now();
-  let lastYield = started;
-  const checkpoint = async () => {
-    if (generation !== request.id) throw CANCELLED;
-    if (performance.now() - lastYield < 8) return;
-    await yieldToEvents();
-    lastYield = performance.now();
-    if (generation !== request.id) throw CANCELLED;
-  };
-  const { id, view, width, height, cssWidth, cssHeight, iterations, reference } = request;
-  const palette = () => switched?.id === id ? switched.palette : request.palette ?? 'classic';
-  const tiles = finished?.request.id === id ? finished.tiles : [];
-  const source = reference && (() => sharedReference(reference));
-  // Worker 0 builds a longer shared orbit even without pixels of its own to deepen: the others wait for it.
-  const sampler = tiles.length || reference?.build
-    ? await createSampler(view, cssWidth, cssHeight, iterations, checkpoint, referenceCache, source) : undefined;
-  const toCss = (pixel: number, size: number, css: number) => (pixel + 0.5) / size * css - css / 2;
-  const xs = new Float64Array(TILE_SIZE), values = new Float64Array(TILE_SIZE), distances = new Float64Array(TILE_SIZE);
-  const targets = new Int32Array(TILE_SIZE), unresolved = new Uint8Array(TILE_SIZE), physical = width / cssWidth;
-  let batch: TileData[] = [], transfer: ArrayBuffer[] = [], lastFlush = started, samples = 0;
-  const flush = () => {
-    if (batch.length) send({ type: 'tiles', id, tiles: batch }, transfer);
-    batch = []; transfer = []; lastFlush = performance.now();
-  };
+  for (const tile of tiles) if (tile.pending) for (const flag of tile.pending) total += flag;
+  const list = new Uint32Array(total);
+  let k = 0;
   for (const tile of tiles) {
-    await checkpoint();
-    const pending = tile.pending!, words = tile.final!, counts = tile.finalCounts!, edges = tile.finalDistances!;
-    const tilePalette = palette(), shade = paletteShader(tilePalette);
-    // Its kept final colours may be in another palette: shade them all again.
-    if (tile.palette !== tilePalette) for (let i = 0; i < words.length; i++) words[i] = shade(counts[i], decodeDistance(edges[i]));
-    tile.palette = tilePalette;
-    for (let row = 0; row < tile.height; row++) {
-      let count = 0;
-      for (let col = 0; col < tile.width; col++) {
-        if (!pending[row * tile.width + col]) continue;
-        targets[count] = col;
-        xs[count++] = toCss(tile.x + col, width, cssWidth);
-      }
-      if (!count) continue;
-      const y = toCss(tile.y + row, height, cssHeight);
-      if (sampler!.row) sampler!.row(xs, count, y, values, distances, unresolved);
-      else for (let k = 0; k < count; k++) { values[k] = sampler!.sample(xs[k], y); distances[k] = lastDistance(); unresolved[k] = lastUnresolved() ? 1 : 0; }
-      for (let k = 0; k < count; k++) {
-        const at = row * tile.width + targets[k];
-        counts[at] = values[k]; edges[at] = encodeDistance(distances[k] * physical);
-        words[at] = shade(counts[at], decodeDistance(edges[at]));
-        pending[at] = unresolved[k];
-      }
-      samples += count;
-      await checkpoint();
+    if (!tile.pending) continue;
+    for (let i = 0; i < tile.pending.length; i++) {
+      if (tile.pending[i]) list[k++] = (tile.y + Math.floor(i / tile.width)) * width + tile.x + i % tile.width;
     }
-    const pixels = new Uint8ClampedArray(words.slice().buffer), sentCounts = counts.slice(), sentDistances = edges.slice();
-    batch.push({ x: tile.x, y: tile.y, width: tile.width, height: tile.height, clipWidth: tile.width, clipHeight: tile.height,
-      edgeRight: tile.edgeRight, edgeBottom: tile.edgeBottom, step: 1, pixels, palette: tilePalette, counts: sentCounts, distances: sentDistances });
-    transfer.push(pixels.buffer, sentCounts.buffer, sentDistances.buffer);
-    if (performance.now() - lastFlush >= FLUSH_MS) flush();
   }
-  await checkpoint();
-  flush();
-  const left = tiles.filter(tile => tile.pending!.some(flag => flag));
-  if (finished?.request.id === id) finished = { request: { ...request, deepen: undefined }, tiles: left };
-  send({ type: 'pass', id, step: 1, deepen: true, elapsed: performance.now() - started, fallbacks: sampler?.stats.fallbacks ?? 0,
-    samples, unresolved: sampler?.stats.unresolved ?? 0, pending: countPending(left) });
+  return list;
 }
 
 /**
- * Sample exactly the pixels a GPU render left to the CPU (see main.ts), in
- * the order given, and send their counts and distance levels in batches.
+ * Sample exactly the listed pixels, in the order given (those a GPU render
+ * left to the CPU, or a draft's unresolved ones at a raised budget; see
+ * main.ts), and send their counts and distance levels in batches.
  */
 async function samplePixels(request: PixelRequest): Promise<void> {
   // Queued behind a request that ran long, for a render since replaced.
